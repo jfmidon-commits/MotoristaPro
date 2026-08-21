@@ -21,6 +21,7 @@ export default function SyncStatusScreen() {
         <Row label="Transações pendentes" value={String(status.pendingTransactions)} />
         <Row label="Veículos pendentes" value={String(status.pendingVehicles)} />
         <Row label="Manutenções pendentes" value={String(status.pendingMaintenance)} />
+        <Row label="Planos preventivos pendentes" value={String(status.pendingPreventiveMaintenance)} />
         <Row label="Turnos pendentes" value={String(status.pendingWorkSessions)} />
         <Row label="Deleções pendentes" value={String(status.pendingDeletes)} />
         <Row
