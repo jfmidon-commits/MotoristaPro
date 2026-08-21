@@ -133,10 +133,6 @@ async function markSyncState(id: string, state: Transaction["sync_state"], error
   ]);
 }
 
-/**
- * Persiste a intenção de deleção. O índice único da tabela garante apenas um
- * tombstone por registro; chamadas repetidas apenas reativam a mesma fila.
- */
 export async function queueDelete(params: {
   userId: string;
   tableName: string;
@@ -155,10 +151,6 @@ export async function queueDelete(params: {
   );
 }
 
-/**
- * Processa deleções pendentes. No modo force, inclui itens que já atingiram o
- * limite automático de tentativas, permitindo recuperação manual pelo usuário.
- */
 export async function processPendingDeletes(
   userId: string,
   opts?: { force?: boolean }
@@ -195,6 +187,9 @@ export async function processPendingDeletes(
         case "work_sessions":
           result = await supabase.from("work_sessions").delete().eq("id", item.record_id);
           break;
+        case "preventive_maintenance_plans":
+          result = await supabase.from("preventive_maintenance_plans").delete().eq("id", item.record_id);
+          break;
         default:
           remoteError = "table_name desconhecido";
       }
@@ -228,6 +223,9 @@ export async function processPendingDeletes(
         break;
       case "work_sessions":
         await db.runAsync(`DELETE FROM work_sessions WHERE id = ?`, [item.record_id]);
+        break;
+      case "preventive_maintenance_plans":
+        await db.runAsync(`DELETE FROM preventive_maintenance_plans WHERE id = ?`, [item.record_id]);
         break;
     }
 
@@ -302,7 +300,6 @@ export async function getPendingTransactions(userId: string): Promise<Transactio
   );
 }
 
-/** Retorna todos os tombstones ainda não resolvidos, inclusive os esgotados. */
 export async function getPendingDeletes(userId: string): Promise<PendingDelete[]> {
   const db = await getDb();
   return db.getAllAsync<PendingDelete>(
