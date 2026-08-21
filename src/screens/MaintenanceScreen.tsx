@@ -20,7 +20,11 @@ export default function MaintenanceScreen({ navigation }: any) {
     if (!user?.id) return;
     const v = await getDefaultVehicle(user.id);
     setVehicle(v);
-    if (v) setEvents(await getMaintenanceEvents(v.id));
+    if (v) {
+      setEvents(await getMaintenanceEvents(user.id, v.id));
+    } else {
+      setEvents([]);
+    }
   }, [user?.id]);
 
   useFocusEffect(
