@@ -5,14 +5,14 @@ export type TransactionType = "income" | "expense";
 export type SyncState = "pending" | "synced" | "error";
 
 export interface Transaction {
-  id: string; // uuid local, também usado como PK no Supabase
+  id: string;
   user_id: string;
   vehicle_id: string | null;
   type: TransactionType;
   category: string;
-  amount: number; // sempre em centavos (evita erro de ponto flutuante)
+  amount: number;
   description: string | null;
-  occurred_at: string; // ISO string
+  occurred_at: string;
   created_at: string;
   sync_state: SyncState;
   sync_error: string | null;
@@ -31,9 +31,9 @@ export interface Vehicle {
 export interface MaintenanceEvent {
   id: string;
   user_id: string;
-  vehicle_id: string; // NUNCA null — manutenção sempre aponta pra um veículo real
+  vehicle_id: string;
   description: string;
-  cost: number; // centavos
+  cost: number;
   odometer_km: number | null;
   performed_at: string;
   created_at: string;
@@ -49,12 +49,27 @@ export interface WorkSession {
   start_odometer_km: number | null;
   end_odometer_km: number | null;
   created_at: string;
+  sync_state: SyncState;
+  sync_error: string | null;
+}
+
+export interface PendingDelete {
+  id: string;
+  user_id: string;
+  table_name: string;
+  record_id: string;
+  created_at: string;
+  sync_state: SyncState;
+  sync_error: string | null;
+  attempts: number;
 }
 
 export interface SyncStatusSnapshot {
   pendingTransactions: number;
   pendingVehicles: number;
   pendingMaintenance: number;
+  pendingWorkSessions: number;
+  pendingDeletes: number;
   lastSyncAttemptAt: string | null;
   lastSyncSuccessAt: string | null;
   lastError: string | null;

@@ -2,7 +2,9 @@ import "react-native-get-random-values";
 import { v4 as uuidv4 } from "uuid";
 import { getDb } from "@/lib/database";
 import { supabase } from "@/lib/supabase";
-import type { Transaction, TransactionType, SupabaseErrorShape } from "@/types";
+import type { Transaction, TransactionType, SupabaseErrorShape, PendingDelete } from "@/types";
+
+const MAX_DELETE_ATTEMPTS = 5;
 
 /**
  * addTransaction() é a única porta de entrada pra criar uma transação.
@@ -19,6 +21,10 @@ export async function addTransaction(params: {
   description?: string;
   occurredAt?: Date;
 }): Promise<Transaction> {
+  if (params.amountInCents < 0) {
+    throw new Error("Valor da transação não pode ser negativo.");
+  }
+
   const db = await getDb();
 
   const tx: Transaction = {
@@ -146,6 +152,141 @@ async function markSyncState(id: string, state: Transaction["sync_state"], error
   ]);
 }
 
+// ============================================================
+// DELETE SEGURO COM FILA DE DELEÇÃO
+// ============================================================
+
+/**
+ * Enfileira uma deleção para processamento assíncrono.
+ * O registro local NÃO é removido imediatamente — fica invisível via filtro de tombstone.
+ */
+export async function queueDelete(params: {
+  userId: string;
+  tableName: string;
+  recordId: string;
+}): Promise<void> {
+  const db = await getDb();
+  await db.runAsync(
+    `INSERT INTO pending_deletes (id, user_id, table_name, record_id, created_at, sync_state, sync_error, attempts)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    [uuidv4(), params.userId, params.tableName, params.recordId, new Date().toISOString(), "pending", null, 0]
+  );
+}
+
+/**
+ * Processa a fila de deleções pendentes.
+ * Só remove localmente após confirmação remota.
+ * Retry automático enquanto attempts < MAX_DELETE_ATTEMPTS.
+ */
+export async function processPendingDeletes(userId: string): Promise<void> {
+  const db = await getDb();
+  const pending = await db.getAllAsync<PendingDelete>(
+    `SELECT * FROM pending_deletes
+     WHERE user_id = ? AND attempts < ?
+     ORDER BY created_at ASC`,
+    [userId, MAX_DELETE_ATTEMPTS]
+  );
+
+  for (const item of pending) {
+    let remoteError: string | null = null;
+
+    try {
+      let result: { error: any } | null = null;
+
+      switch (item.table_name) {
+        case "transactions":
+          result = await supabase.from("transactions").delete().eq("id", item.record_id);
+          break;
+        case "vehicles":
+          result = await supabase.from("vehicles").delete().eq("id", item.record_id);
+          break;
+        case "maintenance_events":
+          result = await supabase.from("maintenance_events").delete().eq("id", item.record_id);
+          break;
+        case "work_sessions":
+          result = await supabase.from("work_sessions").delete().eq("id", item.record_id);
+          break;
+        default:
+          console.warn("[DELETE] table_name desconhecido:", item.table_name);
+          remoteError = "table_name desconhecido";
+      }
+
+      if (result && result.error) {
+        remoteError = result.error.message;
+      }
+    } catch (err: any) {
+      remoteError = err?.message ?? "Erro de rede";
+    }
+
+    if (remoteError) {
+      // Falha: incrementa attempts, mantém pending (não muda para error permanentemente)
+      await db.runAsync(
+        `UPDATE pending_deletes SET sync_error = ?, attempts = attempts + 1 WHERE id = ?`,
+        [remoteError, item.id]
+      );
+      console.log("[DELETE] falha remota, retry agendado:", item.record_id, remoteError);
+    } else {
+      // Sucesso: remove do local e da fila
+      switch (item.table_name) {
+        case "transactions":
+          await db.runAsync(`DELETE FROM transactions WHERE id = ?`, [item.record_id]);
+          break;
+        case "vehicles":
+          await db.runAsync(`DELETE FROM vehicles WHERE id = ?`, [item.record_id]);
+          break;
+        case "maintenance_events":
+          await db.runAsync(`DELETE FROM maintenance_events WHERE id = ?`, [item.record_id]);
+          break;
+        case "work_sessions":
+          await db.runAsync(`DELETE FROM work_sessions WHERE id = ?`, [item.record_id]);
+          break;
+      }
+      await db.runAsync(`DELETE FROM pending_deletes WHERE id = ?`, [item.id]);
+      console.log("[DELETE] sucesso remoto e local:", item.record_id);
+    }
+  }
+}
+
+/**
+ * Verifica se um registro está marcado para deleção (tombstone).
+ */
+export async function isPendingDelete(tableName: string, recordId: string): Promise<boolean> {
+  const db = await getDb();
+  const row = await db.getFirstAsync<{ count: number }>(
+    `SELECT COUNT(*) as count FROM pending_deletes WHERE table_name = ? AND record_id = ?`,
+    [tableName, recordId]
+  );
+  return (row?.count ?? 0) > 0;
+}
+
+/**
+ * deleteTransaction: fluxo seguro offline-first.
+ * 1. Tenta deletar remoto.
+ * 2. Se remoto OK -> deleta local.
+ * 3. Se remoto falha (rede/erro) -> enfileira para retry, NÃO deleta local.
+ * 4. O registro fica invisível via filtro de tombstone em leituras.
+ */
+export async function deleteTransaction(userId: string, id: string): Promise<void> {
+  try {
+    const { error } = await supabase.from("transactions").delete().eq("id", id);
+    if (error) {
+      console.log("[DELETE] erro remoto — enfileirando:", error.message);
+      await queueDelete({ userId, tableName: "transactions", recordId: id });
+      return;
+    }
+  } catch (err: any) {
+    console.log("[DELETE] falha de rede — enfileirando:", err?.message);
+    await queueDelete({ userId, tableName: "transactions", recordId: id });
+    return;
+  }
+
+  // Remoto OK: remove local definitivamente
+  const db = await getDb();
+  await db.runAsync(`DELETE FROM transactions WHERE id = ?`, [id]);
+  // Limpa qualquer pending_delete residual (caso exista de retry anterior)
+  await db.runAsync(`DELETE FROM pending_deletes WHERE table_name = 'transactions' AND record_id = ?`, [id]);
+}
+
 export async function getAllTransactions(
   userId: string,
   opts?: { limit?: number; offset?: number }
@@ -153,33 +294,39 @@ export async function getAllTransactions(
   const db = await getDb();
   const limit = opts?.limit ?? 50;
   const offset = opts?.offset ?? 0;
+  // Filtra tombstones (registros com pending_delete)
   const rows = await db.getAllAsync<Transaction>(
-    `SELECT * FROM transactions WHERE user_id = ? ORDER BY occurred_at DESC LIMIT ? OFFSET ?`,
+    `SELECT t.* FROM transactions t
+     WHERE t.user_id = ?
+       AND NOT EXISTS (
+         SELECT 1 FROM pending_deletes pd
+         WHERE pd.table_name = 'transactions' AND pd.record_id = t.id
+       )
+     ORDER BY t.occurred_at DESC LIMIT ? OFFSET ?`,
     [userId, limit, offset]
   );
   return rows;
 }
 
-export async function deleteTransaction(id: string): Promise<void> {
-  const db = await getDb();
-
-  try {
-    const { error } = await supabase.from("transactions").delete().eq("id", id);
-    if (error) {
-      console.log("[SUPABASE] erro ao excluir remotamente (removendo local mesmo assim)", error);
-    }
-  } catch (err) {
-    console.log("[SYNC] falha de rede ao excluir remotamente (removendo local mesmo assim)", err);
-  }
-
-  await db.runAsync(`DELETE FROM transactions WHERE id = ?`, [id]);
-}
-
 export async function getPendingTransactions(userId: string): Promise<Transaction[]> {
   const db = await getDb();
   const rows = await db.getAllAsync<Transaction>(
-    `SELECT * FROM transactions WHERE user_id = ? AND sync_state != 'synced' ORDER BY created_at ASC`,
+    `SELECT t.* FROM transactions t
+     WHERE t.user_id = ? AND t.sync_state != 'synced'
+       AND NOT EXISTS (
+         SELECT 1 FROM pending_deletes pd
+         WHERE pd.table_name = 'transactions' AND pd.record_id = t.id
+       )
+     ORDER BY t.created_at ASC`,
     [userId]
   );
   return rows;
+}
+
+export async function getPendingDeletes(userId: string): Promise<PendingDelete[]> {
+  const db = await getDb();
+  return db.getAllAsync<PendingDelete>(
+    `SELECT * FROM pending_deletes WHERE user_id = ? AND attempts < ? ORDER BY created_at ASC`,
+    [userId, MAX_DELETE_ATTEMPTS]
+  );
 }

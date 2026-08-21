@@ -1,8 +1,5 @@
 import * as SQLite from "expo-sqlite";
 
-// Fonte de verdade local. O app tem que funcionar 100% offline com isso,
-// mesmo que o Supabase esteja fora do ar.
-
 let dbInstance: SQLite.SQLiteDatabase | null = null;
 
 export async function getDb(): Promise<SQLite.SQLiteDatabase> {
@@ -13,9 +10,11 @@ export async function getDb(): Promise<SQLite.SQLiteDatabase> {
 }
 
 async function migrate(db: SQLite.SQLiteDatabase) {
-  await db.execAsync(`
-    PRAGMA journal_mode = WAL;
+  // WAL mode
+  await db.execAsync(`PRAGMA journal_mode = WAL;`);
 
+  // Schema base (idempotente via IF NOT EXISTS)
+  await db.execAsync(`
     CREATE TABLE IF NOT EXISTS vehicles (
       id TEXT PRIMARY KEY NOT NULL,
       user_id TEXT NOT NULL,
@@ -65,6 +64,8 @@ async function migrate(db: SQLite.SQLiteDatabase) {
       start_odometer_km INTEGER,
       end_odometer_km INTEGER,
       created_at TEXT NOT NULL,
+      sync_state TEXT,
+      sync_error TEXT,
       FOREIGN KEY (vehicle_id) REFERENCES vehicles(id)
     );
 
@@ -73,6 +74,44 @@ async function migrate(db: SQLite.SQLiteDatabase) {
     CREATE INDEX IF NOT EXISTS idx_maintenance_vehicle ON maintenance_events(vehicle_id);
     CREATE INDEX IF NOT EXISTS idx_work_sessions_user_started ON work_sessions(user_id, started_at);
   `);
+
+  // Migrações incrementais controladas por user_version
+  const versionResult = await db.getFirstAsync<{ user_version: number }>(`PRAGMA user_version;`);
+  const currentVersion = versionResult?.user_version ?? 0;
+
+  if (currentVersion < 1) {
+    // v1: adiciona sync_state/sync_error a work_sessions (instalações antigas)
+    await db.execAsync(`
+      ALTER TABLE work_sessions ADD COLUMN sync_state TEXT;
+      ALTER TABLE work_sessions ADD COLUMN sync_error TEXT;
+    `);
+    // Atualiza registros existentes para synced (já estavam no banco, presumimos sincronizados)
+    await db.execAsync(`UPDATE work_sessions SET sync_state = 'synced' WHERE sync_state IS NULL;`);
+    await db.setVersionAsync(1);
+  }
+
+  if (currentVersion < 2) {
+    // v2: tabela pending_deletes + índices adicionais
+    await db.execAsync(`
+      CREATE TABLE IF NOT EXISTS pending_deletes (
+        id TEXT PRIMARY KEY NOT NULL,
+        user_id TEXT NOT NULL,
+        table_name TEXT NOT NULL,
+        record_id TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        sync_state TEXT NOT NULL DEFAULT 'pending',
+        sync_error TEXT,
+        attempts INTEGER NOT NULL DEFAULT 0
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_pending_deletes_user ON pending_deletes(user_id);
+      CREATE INDEX IF NOT EXISTS idx_pending_deletes_sync ON pending_deletes(sync_state);
+      CREATE INDEX IF NOT EXISTS idx_work_sessions_user ON work_sessions(user_id);
+      CREATE INDEX IF NOT EXISTS idx_vehicles_user ON vehicles(user_id);
+      CREATE INDEX IF NOT EXISTS idx_maintenance_user ON maintenance_events(user_id);
+    `);
+    await db.setVersionAsync(2);
+  }
 }
 
 /** Usado apenas em debug manual — nunca chamado automaticamente pelo app. */
@@ -83,5 +122,6 @@ export async function DEBUG_wipeLocalDb() {
     DELETE FROM maintenance_events;
     DELETE FROM transactions;
     DELETE FROM vehicles;
+    DELETE FROM pending_deletes;
   `);
 }
