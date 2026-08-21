@@ -26,6 +26,7 @@ export interface Vehicle {
   is_default: boolean;
   created_at: string;
   sync_state: SyncState;
+  sync_error: string | null;
 }
 
 export interface MaintenanceEvent {
@@ -38,6 +39,7 @@ export interface MaintenanceEvent {
   performed_at: string;
   created_at: string;
   sync_state: SyncState;
+  sync_error: string | null;
 }
 
 export interface WorkSession {
