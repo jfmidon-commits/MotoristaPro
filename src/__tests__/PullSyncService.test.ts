@@ -26,12 +26,27 @@ const remoteTransaction = {
   created_at: "2026-08-21T12:00:00.000Z"
 };
 
-function configureRemoteRows(params?: { transactions?: any[] }) {
+const remotePreventivePlan = {
+  id: "plan-remote-1",
+  user_id: "user-1",
+  vehicle_id: "vehicle-1",
+  category: "Troca de óleo",
+  interval_km: 10_000,
+  interval_days: 180,
+  warning_km: 1_000,
+  warning_days: 15,
+  is_active: true,
+  created_at: "2026-08-21T12:00:00.000Z",
+  updated_at: "2026-08-21T12:00:00.000Z"
+};
+
+function configureRemoteRows(params?: { transactions?: any[]; preventivePlans?: any[] }) {
   const rowsByTable: Record<string, any[]> = {
     vehicles: [],
     transactions: params?.transactions ?? [],
     maintenance_events: [],
-    work_sessions: []
+    work_sessions: [],
+    preventive_maintenance_plans: params?.preventivePlans ?? []
   };
 
   mockedFrom.mockImplementation(((table: string) => ({
@@ -43,18 +58,24 @@ function configureRemoteRows(params?: { transactions?: any[] }) {
 
 function createDbMock(options?: {
   localTransactionState?: string | null;
+  localPreventiveState?: string | null;
   tombstoneCount?: number;
   localSyncedTransactions?: Array<{ id: string }>;
+  localSyncedPreventive?: Array<{ id: string }>;
 }) {
   return {
     getFirstAsync: jest.fn(async (sql: string) => {
       if (sql.includes("pending_deletes")) return { count: options?.tombstoneCount ?? 0 };
+      if (sql.includes("FROM preventive_maintenance_plans")) {
+        return options?.localPreventiveState ? { sync_state: options.localPreventiveState } : null;
+      }
       if (sql.includes("FROM transactions")) {
         return options?.localTransactionState ? { sync_state: options.localTransactionState } : null;
       }
       return null;
     }),
     getAllAsync: jest.fn(async (sql: string) => {
+      if (sql.includes("FROM preventive_maintenance_plans")) return options?.localSyncedPreventive ?? [];
       if (sql.includes("FROM transactions")) return options?.localSyncedTransactions ?? [];
       return [];
     }),
@@ -133,6 +154,56 @@ describe("PullSyncService", () => {
 
     expect(result.removed).toBe(0);
     expect(db.runAsync).not.toHaveBeenCalled();
+  });
+
+  it("importa plano preventivo remoto numa instalação nova", async () => {
+    configureRemoteRows({ preventivePlans: [remotePreventivePlan] });
+    const db = createDbMock();
+    mockedGetDb.mockResolvedValue(db as never);
+
+    const result = await pullRemoteState("user-1");
+
+    expect(result.preventiveMaintenance).toBe(1);
+    expect(db.runAsync).toHaveBeenCalledWith(
+      expect.stringContaining("INSERT INTO preventive_maintenance_plans"),
+      expect.arrayContaining(["plan-remote-1", "user-1", "vehicle-1", "Troca de óleo", 10_000])
+    );
+  });
+
+  it("não sobrescreve plano preventivo local pending", async () => {
+    configureRemoteRows({ preventivePlans: [remotePreventivePlan] });
+    const db = createDbMock({ localPreventiveState: "pending" });
+    mockedGetDb.mockResolvedValue(db as never);
+
+    const result = await pullRemoteState("user-1");
+
+    expect(result.preventiveMaintenance).toBe(0);
+    expect(db.runAsync).not.toHaveBeenCalled();
+  });
+
+  it("não ressuscita plano preventivo com tombstone local", async () => {
+    configureRemoteRows({ preventivePlans: [remotePreventivePlan] });
+    const db = createDbMock({ tombstoneCount: 1 });
+    mockedGetDb.mockResolvedValue(db as never);
+
+    const result = await pullRemoteState("user-1");
+
+    expect(result.preventiveMaintenance).toBe(0);
+    expect(db.runAsync).not.toHaveBeenCalled();
+  });
+
+  it("reconcilia deleção remota de plano synced", async () => {
+    configureRemoteRows({ preventivePlans: [] });
+    const db = createDbMock({ localSyncedPreventive: [{ id: "plan-deleted-remote" }] });
+    mockedGetDb.mockResolvedValue(db as never);
+
+    const result = await pullRemoteState("user-1");
+
+    expect(result.removed).toBe(1);
+    expect(db.runAsync).toHaveBeenCalledWith(
+      expect.stringContaining("DELETE FROM preventive_maintenance_plans"),
+      ["plan-deleted-remote", "user-1"]
+    );
   });
 
   it("recusa pull quando a sessão autenticada pertence a outro usuário", async () => {
