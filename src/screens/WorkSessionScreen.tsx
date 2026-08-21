@@ -1,9 +1,9 @@
-import React, { useCallback, useEffect, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { Alert, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useFocusEffect } from "@react-navigation/native";
 import { useAuth } from "@/context/AuthContext";
-import { getDefaultVehicle } from "@/services/VehicleService";
+import { getVehicles } from "@/services/VehicleService";
 import { endWorkSession, getActiveWorkSession, startWorkSession } from "@/services/WorkSessionService";
 import { computeWorkSessionMetrics, formatDuration, type WorkSessionMetrics } from "@/services/WorkSessionMetricsService";
 import { formatCentsToBRL } from "@/utils/formatters";
@@ -22,21 +22,40 @@ function metricMoney(value: number | null): string {
 
 export default function WorkSessionScreen({ navigation }: any) {
   const { user } = useAuth();
-  const [vehicle, setVehicle] = useState<Vehicle | null>(null);
+  const [vehicles, setVehicles] = useState<Vehicle[]>([]);
+  const [selectedVehicleId, setSelectedVehicleId] = useState<string | null>(null);
   const [activeSession, setActiveSession] = useState<WorkSession | null>(null);
   const [metrics, setMetrics] = useState<WorkSessionMetrics | null>(null);
   const [odometer, setOdometer] = useState("");
   const [saving, setSaving] = useState(false);
 
+  const activeVehicle = useMemo(
+    () => (activeSession?.vehicle_id ? vehicles.find((v) => v.id === activeSession.vehicle_id) ?? null : null),
+    [activeSession?.vehicle_id, vehicles]
+  );
+  const selectedVehicle = useMemo(
+    () => (selectedVehicleId ? vehicles.find((v) => v.id === selectedVehicleId) ?? null : null),
+    [selectedVehicleId, vehicles]
+  );
+
   const load = useCallback(async () => {
     if (!user?.id) return;
-    const [defaultVehicle, session] = await Promise.all([
-      getDefaultVehicle(user.id),
+    const [vehicleRows, session] = await Promise.all([
+      getVehicles(user.id),
       getActiveWorkSession(user.id)
     ]);
-    setVehicle(defaultVehicle);
+    setVehicles(vehicleRows);
     setActiveSession(session);
     setMetrics(session ? await computeWorkSessionMetrics(user.id, session) : null);
+
+    if (session?.vehicle_id) {
+      setSelectedVehicleId(session.vehicle_id);
+    } else {
+      setSelectedVehicleId((current) => {
+        if (current && vehicleRows.some((vehicle) => vehicle.id === current)) return current;
+        return vehicleRows.find((vehicle) => vehicle.is_default)?.id ?? vehicleRows[0]?.id ?? null;
+      });
+    }
   }, [user?.id]);
 
   useFocusEffect(useCallback(() => { load(); }, [load]));
@@ -49,7 +68,7 @@ export default function WorkSessionScreen({ navigation }: any) {
 
   async function handleStart() {
     if (!user?.id) return;
-    if (!vehicle) {
+    if (!selectedVehicle) {
       Alert.alert("Cadastre um veículo", "Você precisa de um veículo para iniciar o turno.", [
         { text: "Agora não", style: "cancel" },
         { text: "Cadastrar veículo", onPress: () => navigation.navigate("Vehicles") }
@@ -65,7 +84,7 @@ export default function WorkSessionScreen({ navigation }: any) {
 
     setSaving(true);
     try {
-      await startWorkSession({ userId: user.id, vehicleId: vehicle.id, startOdometerKm: startKm });
+      await startWorkSession({ userId: user.id, vehicleId: selectedVehicle.id, startOdometerKm: startKm });
       setOdometer("");
       await load();
     } catch (err) {
@@ -103,6 +122,7 @@ export default function WorkSessionScreen({ navigation }: any) {
           `Custo/km: ${metricMoney(finalMetrics.costPerKmCents)}`
         ].join("\n")
       );
+      await load();
     } catch (err) {
       Alert.alert("Não foi possível encerrar o turno", (err as Error)?.message ?? "Erro desconhecido");
     } finally {
@@ -116,9 +136,36 @@ export default function WorkSessionScreen({ navigation }: any) {
         <View style={styles.card}>
           <Text style={styles.eyebrow}>{activeSession ? "TURNO ATIVO" : "PRONTO PARA TRABALHAR"}</Text>
           <Text style={styles.title}>{activeSession && metrics ? formatDuration(metrics.durationHours) : "Inicie seu turno"}</Text>
-          <Text style={styles.subtitle}>{vehicle ? `${vehicle.name}${vehicle.plate ? ` • ${vehicle.plate}` : ""}` : "Nenhum veículo padrão"}</Text>
+          <Text style={styles.subtitle}>
+            {(activeSession ? activeVehicle : selectedVehicle)
+              ? `${(activeSession ? activeVehicle : selectedVehicle)?.name}${(activeSession ? activeVehicle : selectedVehicle)?.plate ? ` • ${(activeSession ? activeVehicle : selectedVehicle)?.plate}` : ""}`
+              : "Nenhum veículo selecionado"}
+          </Text>
           {activeSession?.start_odometer_km != null ? <Text style={styles.info}>Odômetro inicial: {activeSession.start_odometer_km} km</Text> : null}
         </View>
+
+        {!activeSession && vehicles.length > 0 ? (
+          <View style={styles.vehicleSelector}>
+            <Text style={styles.label}>Veículo do turno</Text>
+            <View style={styles.vehicleChips}>
+              {vehicles.map((vehicle) => {
+                const selected = vehicle.id === selectedVehicleId;
+                return (
+                  <Pressable
+                    key={vehicle.id}
+                    style={[styles.vehicleChip, selected && styles.vehicleChipSelected]}
+                    onPress={() => setSelectedVehicleId(vehicle.id)}
+                  >
+                    <Text style={[styles.vehicleChipText, selected && styles.vehicleChipTextSelected]}>
+                      {vehicle.name}{vehicle.is_default ? " ★" : ""}
+                    </Text>
+                    {vehicle.plate ? <Text style={[styles.vehicleChipPlate, selected && styles.vehicleChipTextSelected]}>{vehicle.plate}</Text> : null}
+                  </Pressable>
+                );
+              })}
+            </View>
+          </View>
+        ) : null}
 
         {activeSession && metrics ? (
           <View style={styles.metricsCard}>
@@ -141,11 +188,17 @@ export default function WorkSessionScreen({ navigation }: any) {
           <Text style={styles.primaryButtonText}>{saving ? "Salvando..." : activeSession ? "Encerrar turno" : "Iniciar turno"}</Text>
         </Pressable>
 
-        {!vehicle ? (
+        {vehicles.length === 0 ? (
           <Pressable style={styles.secondaryButton} onPress={() => navigation.navigate("Vehicles")}>
             <Text style={styles.secondaryButtonText}>Cadastrar veículo</Text>
           </Pressable>
-        ) : null}
+        ) : (
+          !activeSession ? (
+            <Pressable style={styles.secondaryButton} onPress={() => navigation.navigate("Vehicles")}>
+              <Text style={styles.secondaryButtonText}>Gerenciar veículos</Text>
+            </Pressable>
+          ) : null
+        )}
 
         <Pressable style={styles.secondaryButton} onPress={() => navigation.navigate("WorkSessionHistory")}>
           <Text style={styles.secondaryButtonText}>Ver histórico de turnos</Text>
@@ -174,6 +227,13 @@ const styles = StyleSheet.create({
   title: { color: "#fff", fontSize: 28, fontWeight: "800", marginTop: 6 },
   subtitle: { color: "#94A3B8", marginTop: 6 },
   info: { color: "#CBD5E1", marginTop: 14, fontSize: 13 },
+  vehicleSelector: { backgroundColor: "#1E293B", borderRadius: 14, padding: 14, gap: 10 },
+  vehicleChips: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
+  vehicleChip: { backgroundColor: "#0F172A", borderWidth: 1, borderColor: "#334155", borderRadius: 10, paddingVertical: 9, paddingHorizontal: 12 },
+  vehicleChipSelected: { backgroundColor: "#38BDF8", borderColor: "#38BDF8" },
+  vehicleChipText: { color: "#CBD5E1", fontSize: 13, fontWeight: "700" },
+  vehicleChipTextSelected: { color: "#082F49" },
+  vehicleChipPlate: { color: "#64748B", fontSize: 10, marginTop: 2 },
   metricsCard: { backgroundColor: "#1E293B", borderRadius: 16, padding: 16, gap: 12 },
   metricRow: { flexDirection: "row", gap: 10 },
   metric: { flex: 1, backgroundColor: "#0F172A", borderRadius: 10, padding: 12 },
