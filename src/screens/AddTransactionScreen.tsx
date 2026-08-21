@@ -6,8 +6,19 @@ import { addTransaction } from "@/services/TransactionService";
 import { getDefaultVehicle } from "@/services/VehicleService";
 import { parseBRLInputToCents } from "@/utils/formatters";
 
-const INCOME_CATEGORIES = ["Corrida", "Gorjeta", "Bônus", "Outro"];
-const EXPENSE_CATEGORIES = ["Combustível", "Manutenção", "Alimentação", "Pedágio", "Outro"];
+const INCOME_CATEGORIES = ["Corrida", "Gorjeta", "Bônus", "Promoções", "Outros"];
+const EXPENSE_CATEGORIES = [
+  "Combustível",
+  "Pedágio",
+  "Estacionamento",
+  "Lavagem",
+  "Manutenção",
+  "Alimentação",
+  "Multa",
+  "Seguro",
+  "Financiamento/locação",
+  "Outros"
+];
 
 export default function AddTransactionScreen({ route, navigation }: any) {
   const type: "income" | "expense" = route.params?.type ?? "income";
@@ -48,7 +59,7 @@ export default function AddTransactionScreen({ route, navigation }: any) {
 
   return (
     <SafeAreaView style={styles.container}>
-      <Text style={styles.title}>{type === "income" ? "Nova entrada" : "Nova saída"}</Text>
+      <Text style={styles.title}>{type === "income" ? "Nova receita" : "Nova despesa"}</Text>
 
       <Text style={styles.label}>Valor (R$)</Text>
       <TextInput
