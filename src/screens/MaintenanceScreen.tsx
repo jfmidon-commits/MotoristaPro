@@ -21,13 +21,23 @@ function parseOdometer(value: string): number | undefined {
   return Number.isFinite(parsed) ? Math.round(parsed) : Number.NaN;
 }
 
-export default function MaintenanceScreen({ navigation }: any) {
+function isKnownCategory(value: string | undefined): value is MaintenanceCategory {
+  return !!value && (MAINTENANCE_CATEGORIES as readonly string[]).includes(value);
+}
+
+export default function MaintenanceScreen({ navigation, route }: any) {
   const { user } = useAuth();
+  const requestedVehicleId = route.params?.vehicleId as string | undefined;
+  const requestedCategory = route.params?.category as string | undefined;
+  const knownRequestedCategory = isKnownCategory(requestedCategory);
+
   const [vehicles, setVehicles] = useState<Vehicle[]>([]);
-  const [selectedVehicleId, setSelectedVehicleId] = useState<string | null>(null);
+  const [selectedVehicleId, setSelectedVehicleId] = useState<string | null>(requestedVehicleId ?? null);
   const [events, setEvents] = useState<MaintenanceEvent[]>([]);
-  const [category, setCategory] = useState<MaintenanceCategory>("Troca de óleo");
-  const [notes, setNotes] = useState("");
+  const [category, setCategory] = useState<MaintenanceCategory>(
+    knownRequestedCategory ? requestedCategory : requestedCategory ? "Outros" : "Troca de óleo"
+  );
+  const [notes, setNotes] = useState(knownRequestedCategory ? "" : requestedCategory ?? "");
   const [cost, setCost] = useState("");
   const [odometer, setOdometer] = useState("");
   const [saving, setSaving] = useState(false);
@@ -39,13 +49,14 @@ export default function MaintenanceScreen({ navigation }: any) {
 
     const selected =
       rows.find((v) => v.id === selectedVehicleId) ??
+      rows.find((v) => v.id === requestedVehicleId) ??
       rows.find((v) => v.is_default) ??
       rows[0] ??
       null;
 
     setSelectedVehicleId(selected?.id ?? null);
     setEvents(selected ? await getMaintenanceEvents(user.id, selected.id) : []);
-  }, [selectedVehicleId, user?.id]);
+  }, [requestedVehicleId, selectedVehicleId, user?.id]);
 
   useFocusEffect(
     useCallback(() => {
@@ -119,7 +130,12 @@ export default function MaintenanceScreen({ navigation }: any) {
         contentContainerStyle={styles.listContent}
         ListHeaderComponent={
           <View>
-            <Text style={styles.sectionTitle}>Veículo</Text>
+            <View style={styles.topActionRow}>
+              <Text style={styles.sectionTitle}>Veículo</Text>
+              <Pressable onPress={() => navigation.navigate("PreventiveMaintenance")}>
+                <Text style={styles.preventiveLink}>Manutenção preventiva →</Text>
+              </Pressable>
+            </View>
             {vehicles.length > 0 ? (
               <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.vehicleRow}>
                 {vehicles.map((vehicle) => {
@@ -188,9 +204,7 @@ export default function MaintenanceScreen({ navigation }: any) {
             <View style={styles.historyHeader}>
               <View>
                 <Text style={styles.sectionTitle}>Histórico</Text>
-                <Text style={styles.historySubtitle}>
-                  {selectedVehicle ? selectedVehicle.name : "Selecione um veículo"}
-                </Text>
+                <Text style={styles.historySubtitle}>{selectedVehicle ? selectedVehicle.name : "Selecione um veículo"}</Text>
               </View>
               <Pressable onPress={() => navigation.navigate("Vehicles")}>
                 <Text style={styles.manageLink}>Gerenciar veículos</Text>
@@ -220,6 +234,8 @@ export default function MaintenanceScreen({ navigation }: any) {
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: "#0F172A" },
   listContent: { padding: 20, paddingBottom: 40 },
+  topActionRow: { flexDirection: "row", justifyContent: "space-between", alignItems: "center" },
+  preventiveLink: { color: "#38BDF8", fontSize: 12, fontWeight: "800" },
   sectionTitle: { color: "#fff", fontSize: 16, fontWeight: "800", marginTop: 6, marginBottom: 10 },
   vehicleRow: { gap: 8, paddingBottom: 6 },
   vehicleChip: { backgroundColor: "#1E293B", borderRadius: 999, paddingVertical: 9, paddingHorizontal: 14 },
@@ -241,16 +257,7 @@ const styles = StyleSheet.create({
   historySubtitle: { color: "#64748B", fontSize: 12, marginTop: -6 },
   manageLink: { color: "#38BDF8", fontSize: 12, fontWeight: "700" },
   empty: { color: "#64748B", textAlign: "center", marginTop: 20 },
-  row: {
-    flexDirection: "row",
-    justifyContent: "space-between",
-    alignItems: "center",
-    backgroundColor: "#1E293B",
-    borderRadius: 10,
-    padding: 14,
-    marginBottom: 10,
-    gap: 12
-  },
+  row: { flexDirection: "row", justifyContent: "space-between", alignItems: "center", backgroundColor: "#1E293B", borderRadius: 10, padding: 14, marginBottom: 10, gap: 12 },
   description: { color: "#fff", fontWeight: "700" },
   meta: { color: "#94A3B8", fontSize: 12, marginTop: 4 },
   syncState: { color: "#64748B", fontSize: 11, marginTop: 4 },
