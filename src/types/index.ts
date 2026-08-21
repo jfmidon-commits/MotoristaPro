@@ -40,6 +40,17 @@ export interface MaintenanceEvent {
   sync_state: SyncState;
 }
 
+export interface WorkSession {
+  id: string;
+  user_id: string;
+  vehicle_id: string | null;
+  started_at: string;
+  ended_at: string | null;
+  start_odometer_km: number | null;
+  end_odometer_km: number | null;
+  created_at: string;
+}
+
 export interface SyncStatusSnapshot {
   pendingTransactions: number;
   pendingVehicles: number;
