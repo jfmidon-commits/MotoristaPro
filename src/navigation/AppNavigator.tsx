@@ -10,6 +10,7 @@ import TransactionsScreen from "@/screens/TransactionsScreen";
 import VehiclesScreen from "@/screens/VehiclesScreen";
 import MaintenanceScreen from "@/screens/MaintenanceScreen";
 import SyncStatusScreen from "@/screens/SyncStatusScreen";
+import WorkSessionScreen from "@/screens/WorkSessionScreen";
 
 const Stack = createNativeStackNavigator();
 
@@ -38,6 +39,11 @@ export default function AppNavigator() {
         ) : (
           <>
             <Stack.Screen name="Dashboard" component={DashboardScreen} options={{ headerShown: false }} />
+            <Stack.Screen
+              name="WorkSession"
+              component={WorkSessionScreen}
+              options={{ title: "Turno de trabalho" }}
+            />
             <Stack.Screen
               name="AddTransaction"
               component={AddTransactionScreen}
