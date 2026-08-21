@@ -55,6 +55,33 @@ export interface WorkSession {
   sync_error: string | null;
 }
 
+export interface PreventiveMaintenancePlan {
+  id: string;
+  user_id: string;
+  vehicle_id: string;
+  category: string;
+  interval_km: number | null;
+  interval_days: number | null;
+  warning_km: number | null;
+  warning_days: number | null;
+  is_active: boolean;
+  created_at: string;
+  updated_at: string;
+  sync_state: SyncState;
+  sync_error: string | null;
+}
+
+export type PreventiveMaintenanceStatusLabel = "ok" | "soon" | "overdue" | "unknown";
+
+export interface PreventiveMaintenanceOverview {
+  plan: PreventiveMaintenancePlan;
+  lastEvent: MaintenanceEvent | null;
+  currentOdometerKm: number | null;
+  remainingKm: number | null;
+  remainingDays: number | null;
+  status: PreventiveMaintenanceStatusLabel;
+}
+
 export interface PendingDelete {
   id: string;
   user_id: string;
@@ -71,6 +98,7 @@ export interface SyncStatusSnapshot {
   pendingVehicles: number;
   pendingMaintenance: number;
   pendingWorkSessions: number;
+  pendingPreventiveMaintenance: number;
   pendingDeletes: number;
   lastSyncAttemptAt: string | null;
   lastSyncSuccessAt: string | null;
