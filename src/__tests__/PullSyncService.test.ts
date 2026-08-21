@@ -41,7 +41,11 @@ function configureRemoteRows(params?: { transactions?: any[] }) {
   })) as never);
 }
 
-function createDbMock(options?: { localTransactionState?: string | null; tombstoneCount?: number }) {
+function createDbMock(options?: {
+  localTransactionState?: string | null;
+  tombstoneCount?: number;
+  localSyncedTransactions?: Array<{ id: string }>;
+}) {
   return {
     getFirstAsync: jest.fn(async (sql: string) => {
       if (sql.includes("pending_deletes")) return { count: options?.tombstoneCount ?? 0 };
@@ -49,6 +53,10 @@ function createDbMock(options?: { localTransactionState?: string | null; tombsto
         return options?.localTransactionState ? { sync_state: options.localTransactionState } : null;
       }
       return null;
+    }),
+    getAllAsync: jest.fn(async (sql: string) => {
+      if (sql.includes("FROM transactions")) return options?.localSyncedTransactions ?? [];
+      return [];
     }),
     runAsync: jest.fn().mockResolvedValue(undefined)
   };
@@ -96,6 +104,34 @@ describe("PullSyncService", () => {
     const result = await pullRemoteState("user-1");
 
     expect(result.transactions).toBe(0);
+    expect(db.runAsync).not.toHaveBeenCalled();
+  });
+
+  it("remove cópia local synced quando o registro foi apagado remotamente", async () => {
+    configureRemoteRows({ transactions: [] });
+    const db = createDbMock({ localSyncedTransactions: [{ id: "tx-deleted-remote" }] });
+    mockedGetDb.mockResolvedValue(db as never);
+
+    const result = await pullRemoteState("user-1");
+
+    expect(result.removed).toBe(1);
+    expect(db.runAsync).toHaveBeenCalledWith(
+      expect.stringContaining("DELETE FROM transactions"),
+      ["tx-deleted-remote", "user-1"]
+    );
+  });
+
+  it("não remove cópia local com tombstone ainda pendente", async () => {
+    configureRemoteRows({ transactions: [] });
+    const db = createDbMock({
+      localSyncedTransactions: [{ id: "tx-delete-pending" }],
+      tombstoneCount: 1
+    });
+    mockedGetDb.mockResolvedValue(db as never);
+
+    const result = await pullRemoteState("user-1");
+
+    expect(result.removed).toBe(0);
     expect(db.runAsync).not.toHaveBeenCalled();
   });
 
