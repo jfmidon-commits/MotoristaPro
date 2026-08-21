@@ -40,7 +40,12 @@ export async function createVehicle(params: {
   };
 
   if (vehicle.is_default) {
-    await db.runAsync(`UPDATE vehicles SET is_default = 0 WHERE user_id = ?`, [params.userId]);
+    await db.runAsync(
+      `UPDATE vehicles
+       SET is_default = 0, sync_state = 'pending', sync_error = NULL
+       WHERE user_id = ? AND is_default = 1`,
+      [params.userId]
+    );
   }
 
   await db.runAsync(
@@ -58,8 +63,72 @@ export async function createVehicle(params: {
     ]
   );
 
-  await syncVehicle(vehicle);
+  if (vehicle.is_default) {
+    await syncAllVehicles(params.userId);
+  } else {
+    await syncVehicle(vehicle);
+  }
   return vehicle;
+}
+
+export async function updateVehicle(params: {
+  userId: string;
+  vehicleId: string;
+  name: string;
+  plate?: string;
+}): Promise<Vehicle> {
+  const db = await getDb();
+  const current = await getVehicleById(params.userId, params.vehicleId);
+  if (!current) throw new Error("Veículo não encontrado.");
+
+  const name = params.name.trim();
+  if (!name) throw new Error("Informe o nome/modelo do veículo.");
+
+  const updated: Vehicle = {
+    ...current,
+    name,
+    plate: params.plate?.trim() || null,
+    sync_state: "pending",
+    sync_error: null
+  };
+
+  await db.runAsync(
+    `UPDATE vehicles
+     SET name = ?, plate = ?, sync_state = 'pending', sync_error = NULL
+     WHERE id = ? AND user_id = ?`,
+    [updated.name, updated.plate, updated.id, params.userId]
+  );
+
+  await syncVehicle(updated);
+  return updated;
+}
+
+export async function setDefaultVehicle(userId: string, vehicleId: string): Promise<void> {
+  const db = await getDb();
+  const target = await getVehicleById(userId, vehicleId);
+  if (!target) throw new Error("Veículo não encontrado.");
+
+  await db.runAsync("BEGIN TRANSACTION");
+  try {
+    await db.runAsync(
+      `UPDATE vehicles
+       SET is_default = 0, sync_state = 'pending', sync_error = NULL
+       WHERE user_id = ? AND is_default = 1`,
+      [userId]
+    );
+    await db.runAsync(
+      `UPDATE vehicles
+       SET is_default = 1, sync_state = 'pending', sync_error = NULL
+       WHERE id = ? AND user_id = ?`,
+      [vehicleId, userId]
+    );
+    await db.runAsync("COMMIT");
+  } catch (error) {
+    await db.runAsync("ROLLBACK");
+    throw error;
+  }
+
+  await syncAllVehicles(userId);
 }
 
 export async function syncVehicle(vehicle: Vehicle): Promise<void> {
@@ -113,10 +182,19 @@ export async function syncVehicle(vehicle: Vehicle): Promise<void> {
 export async function getVehicles(userId: string): Promise<Vehicle[]> {
   const db = await getDb();
   const rows = await db.getAllAsync<VehicleRow>(
-    `SELECT * FROM vehicles WHERE user_id = ? ORDER BY created_at ASC`,
+    `SELECT * FROM vehicles WHERE user_id = ? ORDER BY is_default DESC, created_at ASC`,
     [userId]
   );
   return rows.map(mapVehicleRow);
+}
+
+export async function getVehicleById(userId: string, vehicleId: string): Promise<Vehicle | null> {
+  const db = await getDb();
+  const row = await db.getFirstAsync<VehicleRow>(
+    `SELECT * FROM vehicles WHERE user_id = ? AND id = ? LIMIT 1`,
+    [userId, vehicleId]
+  );
+  return row ? mapVehicleRow(row) : null;
 }
 
 export async function getDefaultVehicle(userId: string): Promise<Vehicle | null> {
@@ -135,4 +213,13 @@ export async function getPendingVehicles(userId: string): Promise<Vehicle[]> {
     [userId]
   );
   return rows.map(mapVehicleRow);
+}
+
+async function syncAllVehicles(userId: string): Promise<void> {
+  const vehicles = await getVehicles(userId);
+  for (const vehicle of vehicles) {
+    if (vehicle.sync_state !== "synced") {
+      await syncVehicle(vehicle);
+    }
+  }
 }
