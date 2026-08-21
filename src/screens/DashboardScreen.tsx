@@ -33,9 +33,19 @@ export default function DashboardScreen({ navigation }: any) {
     setRefreshing(false);
   }
 
-  const income = transactions.filter((t) => t.type === "income").reduce((sum, t) => sum + t.amount, 0);
-  const expense = transactions.filter((t) => t.type === "expense").reduce((sum, t) => sum + t.amount, 0);
+  const income = transactions
+    .filter((t) => t.type === "income")
+    .reduce((sum, t) => sum + t.amount, 0);
+  const expense = transactions
+    .filter((t) => t.type === "expense")
+    .reduce((sum, t) => sum + t.amount, 0);
   const balance = income - expense;
+  const totalPending =
+    status.pendingTransactions +
+    status.pendingVehicles +
+    status.pendingMaintenance +
+    status.pendingWorkSessions +
+    status.pendingDeletes;
 
   return (
     <SafeAreaView style={styles.container} edges={["top"]}>
@@ -59,13 +69,15 @@ export default function DashboardScreen({ navigation }: any) {
           </View>
         </View>
 
-        <Pressable
-          style={styles.syncStatus}
-          onPress={() => navigation.navigate("SyncStatus")}
-        >
+        <Pressable style={styles.workButton} onPress={() => navigation.navigate("WorkSession")}>
+          <Text style={styles.workButtonTitle}>Turno de trabalho</Text>
+          <Text style={styles.workButtonText}>Iniciar, acompanhar ou encerrar turno →</Text>
+        </Pressable>
+
+        <Pressable style={styles.syncStatus} onPress={() => navigation.navigate("SyncStatus")}>
           <Text style={styles.syncStatusText}>
-            {status.pendingTransactions > 0
-              ? `${status.pendingTransactions} transação(ões) pendente(s) de sincronização`
+            {totalPending > 0
+              ? `${totalPending} item(ns) aguardando sincronização`
               : "Tudo sincronizado com o Supabase"}
           </Text>
         </Pressable>
@@ -110,6 +122,9 @@ const styles = StyleSheet.create({
   row: { flexDirection: "row", justifyContent: "space-between", marginTop: 8 },
   income: { color: "#22C55E", fontWeight: "600" },
   expenseText: { color: "#EF4444", fontWeight: "600" },
+  workButton: { backgroundColor: "#0EA5E9", borderRadius: 14, padding: 16, marginBottom: 12 },
+  workButtonTitle: { color: "#082F49", fontSize: 16, fontWeight: "800" },
+  workButtonText: { color: "#082F49", marginTop: 2, fontSize: 13 },
   syncStatus: { backgroundColor: "#1E293B", borderRadius: 10, padding: 12, marginBottom: 16 },
   syncStatusText: { color: "#FBBF24", fontSize: 13, textAlign: "center" },
   actions: { flexDirection: "row", gap: 12, marginBottom: 20 },
