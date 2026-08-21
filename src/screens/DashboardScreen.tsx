@@ -1,4 +1,4 @@
-import React, { useCallback, useState } from "react";
+import React, { useCallback, useEffect, useState } from "react";
 import { View, Text, StyleSheet, Pressable, ScrollView, RefreshControl } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useFocusEffect } from "@react-navigation/native";
@@ -12,7 +12,15 @@ import {
   startOfWeekIso,
   type PeriodMetrics
 } from "@/services/MetricsService";
+import { getActiveWorkSession } from "@/services/WorkSessionService";
+import {
+  computeWorkSessionMetrics,
+  formatDuration,
+  type WorkSessionMetrics
+} from "@/services/WorkSessionMetricsService";
+import { getVehicles } from "@/services/VehicleService";
 import { formatCentsToBRL } from "@/utils/formatters";
+import type { Vehicle, WorkSession } from "@/types";
 
 type PeriodKey = "today" | "week" | "month";
 
@@ -38,12 +46,24 @@ export default function DashboardScreen({ navigation }: any) {
   const { status, syncNow } = useTransactionSync();
   const [metrics, setMetrics] = useState<PeriodMetrics | null>(null);
   const [period, setPeriod] = useState<PeriodKey>("today");
+  const [activeSession, setActiveSession] = useState<WorkSession | null>(null);
+  const [sessionMetrics, setSessionMetrics] = useState<WorkSessionMetrics | null>(null);
+  const [sessionVehicle, setSessionVehicle] = useState<Vehicle | null>(null);
   const [refreshing, setRefreshing] = useState(false);
 
   const load = useCallback(async () => {
     if (!user?.id) return;
     const now = new Date();
-    setMetrics(await computeMetrics(user.id, periodStartIso(period, now), endOfDayIso(now)));
+    const [periodResult, session, vehicles] = await Promise.all([
+      computeMetrics(user.id, periodStartIso(period, now), endOfDayIso(now)),
+      getActiveWorkSession(user.id),
+      getVehicles(user.id)
+    ]);
+
+    setMetrics(periodResult);
+    setActiveSession(session);
+    setSessionVehicle(session?.vehicle_id ? vehicles.find((v) => v.id === session.vehicle_id) ?? null : null);
+    setSessionMetrics(session ? await computeWorkSessionMetrics(user.id, session, now) : null);
   }, [period, user?.id]);
 
   useFocusEffect(
@@ -51,6 +71,14 @@ export default function DashboardScreen({ navigation }: any) {
       load();
     }, [load])
   );
+
+  useEffect(() => {
+    if (!activeSession) return;
+    const timer = setInterval(() => {
+      load();
+    }, 30_000);
+    return () => clearInterval(timer);
+  }, [activeSession?.id, load]);
 
   async function onRefresh() {
     setRefreshing(true);
@@ -84,6 +112,39 @@ export default function DashboardScreen({ navigation }: any) {
             <Text style={styles.logout}>Sair</Text>
           </Pressable>
         </View>
+
+        {activeSession && sessionMetrics ? (
+          <Pressable style={styles.activeSessionCard} onPress={() => navigation.navigate("WorkSession")}>
+            <View style={styles.activeSessionHeader}>
+              <View>
+                <Text style={styles.activeSessionEyebrow}>TURNO ATIVO</Text>
+                <Text style={styles.activeSessionVehicle}>
+                  {sessionVehicle
+                    ? `${sessionVehicle.name}${sessionVehicle.plate ? ` • ${sessionVehicle.plate}` : ""}`
+                    : "Veículo do turno"}
+                </Text>
+              </View>
+              <Text style={styles.activeSessionDuration}>{formatDuration(sessionMetrics.durationHours)}</Text>
+            </View>
+            <View style={styles.activeSessionMetrics}>
+              <View style={styles.activeMetric}>
+                <Text style={styles.activeMetricLabel}>Receita</Text>
+                <Text style={[styles.activeMetricValue, styles.income]}>
+                  {formatCentsToBRL(sessionMetrics.grossIncome)}
+                </Text>
+              </View>
+              <View style={styles.activeMetric}>
+                <Text style={styles.activeMetricLabel}>Lucro</Text>
+                <Text style={styles.activeMetricValue}>{formatCentsToBRL(sessionMetrics.netProfit)}</Text>
+              </View>
+              <View style={styles.activeMetric}>
+                <Text style={styles.activeMetricLabel}>Lucro / hora</Text>
+                <Text style={styles.activeMetricValue}>{moneyOrDash(sessionMetrics.perHourCents)}</Text>
+              </View>
+            </View>
+            <Text style={styles.activeSessionAction}>Toque para encerrar o turno →</Text>
+          </Pressable>
+        ) : null}
 
         <View style={styles.periodTabs}>
           {([
@@ -143,9 +204,14 @@ export default function DashboardScreen({ navigation }: any) {
           </View>
         </View>
 
-        <Pressable style={styles.workButton} onPress={() => navigation.navigate("WorkSession")}>
-          <Text style={styles.workButtonTitle}>Turno de trabalho</Text>
-          <Text style={styles.workButtonText}>Iniciar, acompanhar ou encerrar turno →</Text>
+        <Pressable
+          style={[styles.workButton, activeSession && styles.workButtonActive]}
+          onPress={() => navigation.navigate("WorkSession")}
+        >
+          <Text style={styles.workButtonTitle}>{activeSession ? "Encerrar turno" : "Iniciar turno"}</Text>
+          <Text style={styles.workButtonText}>
+            {activeSession ? "Confira o resumo e informe o odômetro final →" : "Registre horário e odômetro inicial →"}
+          </Text>
         </Pressable>
 
         <Pressable style={styles.syncStatus} onPress={() => navigation.navigate("SyncStatus")}>
@@ -196,6 +262,23 @@ const styles = StyleSheet.create({
   title: { color: "#fff", fontSize: 22, fontWeight: "800" },
   subtitle: { color: "#64748B", marginTop: 2, fontSize: 12 },
   logout: { color: "#F87171" },
+  activeSessionCard: {
+    backgroundColor: "#172554",
+    borderWidth: 1,
+    borderColor: "#22C55E",
+    borderRadius: 16,
+    padding: 16,
+    marginBottom: 14
+  },
+  activeSessionHeader: { flexDirection: "row", justifyContent: "space-between", alignItems: "flex-start" },
+  activeSessionEyebrow: { color: "#22C55E", fontSize: 12, fontWeight: "900", letterSpacing: 1 },
+  activeSessionVehicle: { color: "#CBD5E1", fontSize: 13, marginTop: 4 },
+  activeSessionDuration: { color: "#fff", fontSize: 20, fontWeight: "900" },
+  activeSessionMetrics: { flexDirection: "row", gap: 8, marginTop: 14 },
+  activeMetric: { flex: 1, backgroundColor: "#0F172A", borderRadius: 10, padding: 10 },
+  activeMetricLabel: { color: "#94A3B8", fontSize: 10 },
+  activeMetricValue: { color: "#fff", fontSize: 13, fontWeight: "800", marginTop: 4 },
+  activeSessionAction: { color: "#38BDF8", fontSize: 12, fontWeight: "700", marginTop: 12 },
   periodTabs: { flexDirection: "row", backgroundColor: "#1E293B", borderRadius: 12, padding: 4, marginBottom: 12 },
   periodTab: { flex: 1, paddingVertical: 9, alignItems: "center", borderRadius: 9 },
   periodTabActive: { backgroundColor: "#38BDF8" },
@@ -212,6 +295,7 @@ const styles = StyleSheet.create({
   metricLabel: { color: "#94A3B8", fontSize: 12 },
   metricValue: { color: "#fff", fontWeight: "800", fontSize: 17, marginTop: 5 },
   workButton: { backgroundColor: "#0EA5E9", borderRadius: 14, padding: 16, marginBottom: 12 },
+  workButtonActive: { backgroundColor: "#F59E0B" },
   workButtonTitle: { color: "#082F49", fontSize: 16, fontWeight: "800" },
   workButtonText: { color: "#082F49", marginTop: 2, fontSize: 13 },
   syncStatus: { backgroundColor: "#1E293B", borderRadius: 10, padding: 12, marginBottom: 16 },
