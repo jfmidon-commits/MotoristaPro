@@ -8,9 +8,13 @@ import {
   computeMetrics,
   endOfDayIso,
   startOfDayIso,
+  startOfMonthIso,
+  startOfWeekIso,
   type PeriodMetrics
 } from "@/services/MetricsService";
 import { formatCentsToBRL } from "@/utils/formatters";
+
+type PeriodKey = "today" | "week" | "month";
 
 function formatHours(hours: number): string {
   const totalMinutes = Math.round(hours * 60);
@@ -23,17 +27,24 @@ function moneyOrDash(value: number | null): string {
   return value == null ? "—" : formatCentsToBRL(value);
 }
 
+function periodStartIso(period: PeriodKey, date: Date): string {
+  if (period === "week") return startOfWeekIso(date);
+  if (period === "month") return startOfMonthIso(date);
+  return startOfDayIso(date);
+}
+
 export default function DashboardScreen({ navigation }: any) {
   const { user, signOut } = useAuth();
   const { status, syncNow } = useTransactionSync();
   const [metrics, setMetrics] = useState<PeriodMetrics | null>(null);
+  const [period, setPeriod] = useState<PeriodKey>("today");
   const [refreshing, setRefreshing] = useState(false);
 
   const load = useCallback(async () => {
     if (!user?.id) return;
-    const today = new Date();
-    setMetrics(await computeMetrics(user.id, startOfDayIso(today), endOfDayIso(today)));
-  }, [user?.id]);
+    const now = new Date();
+    setMetrics(await computeMetrics(user.id, periodStartIso(period, now), endOfDayIso(now)));
+  }, [period, user?.id]);
 
   useFocusEffect(
     useCallback(() => {
@@ -74,7 +85,24 @@ export default function DashboardScreen({ navigation }: any) {
           </Pressable>
         </View>
 
-        <Text style={styles.sectionTitle}>Hoje</Text>
+        <View style={styles.periodTabs}>
+          {([
+            ["today", "Hoje"],
+            ["week", "Semana"],
+            ["month", "Mês"]
+          ] as const).map(([key, label]) => (
+            <Pressable
+              key={key}
+              style={[styles.periodTab, period === key && styles.periodTabActive]}
+              onPress={() => setPeriod(key)}
+            >
+              <Text style={[styles.periodTabText, period === key && styles.periodTabTextActive]}>
+                {label}
+              </Text>
+            </Pressable>
+          ))}
+        </View>
+
         <View style={styles.profitCard}>
           <Text style={styles.cardLabel}>Lucro líquido</Text>
           <Text style={styles.profitValue}>{formatCentsToBRL(metrics?.netProfit ?? 0)}</Text>
@@ -163,12 +191,16 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     justifyContent: "space-between",
     alignItems: "center",
-    marginBottom: 22
+    marginBottom: 18
   },
   title: { color: "#fff", fontSize: 22, fontWeight: "800" },
   subtitle: { color: "#64748B", marginTop: 2, fontSize: 12 },
   logout: { color: "#F87171" },
-  sectionTitle: { color: "#CBD5E1", fontSize: 14, fontWeight: "700", marginBottom: 8 },
+  periodTabs: { flexDirection: "row", backgroundColor: "#1E293B", borderRadius: 12, padding: 4, marginBottom: 12 },
+  periodTab: { flex: 1, paddingVertical: 9, alignItems: "center", borderRadius: 9 },
+  periodTabActive: { backgroundColor: "#38BDF8" },
+  periodTabText: { color: "#94A3B8", fontWeight: "700", fontSize: 13 },
+  periodTabTextActive: { color: "#082F49" },
   profitCard: { backgroundColor: "#1E293B", borderRadius: 16, padding: 20, marginBottom: 12 },
   cardLabel: { color: "#94A3B8", fontSize: 14 },
   profitValue: { color: "#fff", fontSize: 32, fontWeight: "800", marginVertical: 4 },
