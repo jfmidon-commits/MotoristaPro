@@ -61,7 +61,8 @@ describe("calculateWorkSessionMetrics", () => {
 
     expect(result.netProfit).toBe(-3_000);
     expect(result.perHourCents).toBe(-750);
-    expect(result.perKmCents).toBe(-38);
+    // Math.round(-37.5) em JavaScript resulta em -37 (em direção a +Infinity no empate).
+    expect(result.perKmCents).toBe(-37);
   });
 
   it("retorna métricas por km como null quando não há distância rodada", () => {
