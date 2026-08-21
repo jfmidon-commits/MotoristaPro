@@ -1,5 +1,5 @@
-import React, { useCallback, useEffect, useMemo, useState } from "react";
-import { Alert, Pressable, StyleSheet, Text, TextInput, View } from "react-native";
+import React, { useCallback, useEffect, useState } from "react";
+import { Alert, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useFocusEffect } from "@react-navigation/native";
 import { useAuth } from "@/context/AuthContext";
@@ -9,6 +9,12 @@ import {
   getActiveWorkSession,
   startWorkSession
 } from "@/services/WorkSessionService";
+import {
+  computeWorkSessionMetrics,
+  formatDuration,
+  type WorkSessionMetrics
+} from "@/services/WorkSessionMetricsService";
+import { formatCentsToBRL } from "@/utils/formatters";
 import type { Vehicle, WorkSession } from "@/types";
 
 function parseOdometer(value: string): number | null {
@@ -18,21 +24,17 @@ function parseOdometer(value: string): number | null {
   return Number.isFinite(parsed) ? Math.round(parsed) : null;
 }
 
-function formatElapsed(startedAt: string, nowMs: number): string {
-  const elapsedMs = Math.max(0, nowMs - new Date(startedAt).getTime());
-  const totalMinutes = Math.floor(elapsedMs / 60_000);
-  const hours = Math.floor(totalMinutes / 60);
-  const minutes = totalMinutes % 60;
-  return `${hours}h ${String(minutes).padStart(2, "0")}min`;
+function metricMoney(value: number | null): string {
+  return value == null ? "—" : formatCentsToBRL(value);
 }
 
 export default function WorkSessionScreen({ navigation }: any) {
   const { user } = useAuth();
   const [vehicle, setVehicle] = useState<Vehicle | null>(null);
   const [activeSession, setActiveSession] = useState<WorkSession | null>(null);
+  const [metrics, setMetrics] = useState<WorkSessionMetrics | null>(null);
   const [odometer, setOdometer] = useState("");
   const [saving, setSaving] = useState(false);
-  const [nowMs, setNowMs] = useState(Date.now());
 
   const load = useCallback(async () => {
     if (!user?.id) return;
@@ -42,9 +44,7 @@ export default function WorkSessionScreen({ navigation }: any) {
     ]);
     setVehicle(defaultVehicle);
     setActiveSession(session);
-    if (session?.start_odometer_km != null && !session.ended_at) {
-      setOdometer("");
-    }
+    setMetrics(session ? await computeWorkSessionMetrics(user.id, session) : null);
   }, [user?.id]);
 
   useFocusEffect(
@@ -55,15 +55,11 @@ export default function WorkSessionScreen({ navigation }: any) {
 
   useEffect(() => {
     if (!activeSession) return;
-    setNowMs(Date.now());
-    const timer = setInterval(() => setNowMs(Date.now()), 30_000);
+    const timer = setInterval(() => {
+      load();
+    }, 30_000);
     return () => clearInterval(timer);
-  }, [activeSession?.id]);
-
-  const elapsed = useMemo(
-    () => (activeSession ? formatElapsed(activeSession.started_at, nowMs) : null),
-    [activeSession, nowMs]
-  );
+  }, [activeSession?.id, load]);
 
   async function handleStart() {
     if (!user?.id) return;
@@ -98,7 +94,7 @@ export default function WorkSessionScreen({ navigation }: any) {
   }
 
   async function handleEnd() {
-    if (!activeSession) return;
+    if (!user?.id || !activeSession) return;
     const endKm = parseOdometer(odometer);
     if (endKm == null || endKm < 0) {
       Alert.alert("Odômetro inválido", "Informe a quilometragem atual para encerrar o turno.");
@@ -107,10 +103,25 @@ export default function WorkSessionScreen({ navigation }: any) {
 
     setSaving(true);
     try {
-      await endWorkSession({ sessionId: activeSession.id, endOdometerKm: endKm });
+      const ended = await endWorkSession({ sessionId: activeSession.id, endOdometerKm: endKm });
+      const finalMetrics = await computeWorkSessionMetrics(user.id, ended);
       setOdometer("");
-      await load();
-      Alert.alert("Turno encerrado", "Horas e quilômetros já podem entrar nas suas métricas.");
+      setActiveSession(null);
+      setMetrics(null);
+
+      Alert.alert(
+        "Resumo do turno",
+        [
+          `Duração: ${formatDuration(finalMetrics.durationHours)}`,
+          `Km rodados: ${finalMetrics.totalKm == null ? "—" : `${finalMetrics.totalKm} km`}`,
+          `Receita: ${formatCentsToBRL(finalMetrics.grossIncome)}`,
+          `Despesas: ${formatCentsToBRL(finalMetrics.totalExpense)}`,
+          `Lucro líquido: ${formatCentsToBRL(finalMetrics.netProfit)}`,
+          `Lucro/hora: ${metricMoney(finalMetrics.perHourCents)}`,
+          `Lucro/km: ${metricMoney(finalMetrics.perKmCents)}`,
+          `Custo/km: ${metricMoney(finalMetrics.costPerKmCents)}`
+        ].join("\n")
+      );
     } catch (err) {
       Alert.alert("Não foi possível encerrar o turno", (err as Error)?.message ?? "Erro desconhecido");
     } finally {
@@ -120,10 +131,12 @@ export default function WorkSessionScreen({ navigation }: any) {
 
   return (
     <SafeAreaView style={styles.container} edges={["bottom"]}>
-      <View style={styles.content}>
+      <ScrollView contentContainerStyle={styles.content}>
         <View style={styles.card}>
           <Text style={styles.eyebrow}>{activeSession ? "TURNO ATIVO" : "PRONTO PARA TRABALHAR"}</Text>
-          <Text style={styles.title}>{activeSession ? elapsed : "Inicie seu turno"}</Text>
+          <Text style={styles.title}>
+            {activeSession && metrics ? formatDuration(metrics.durationHours) : "Inicie seu turno"}
+          </Text>
           <Text style={styles.subtitle}>
             {vehicle ? `${vehicle.name}${vehicle.plate ? ` • ${vehicle.plate}` : ""}` : "Nenhum veículo padrão"}
           </Text>
@@ -132,6 +145,22 @@ export default function WorkSessionScreen({ navigation }: any) {
             <Text style={styles.info}>Odômetro inicial: {activeSession.start_odometer_km} km</Text>
           ) : null}
         </View>
+
+        {activeSession && metrics ? (
+          <View style={styles.metricsCard}>
+            <View style={styles.metricRow}>
+              <Metric label="Receita" value={formatCentsToBRL(metrics.grossIncome)} positive />
+              <Metric label="Despesas" value={formatCentsToBRL(metrics.totalExpense)} negative />
+            </View>
+            <View style={styles.metricRow}>
+              <Metric label="Lucro líquido" value={formatCentsToBRL(metrics.netProfit)} />
+              <Metric label="Lucro / hora" value={metricMoney(metrics.perHourCents)} />
+            </View>
+            <Text style={styles.metricsHelp}>
+              R$/km e custo/km são calculados ao encerrar o turno com o odômetro final.
+            </Text>
+          </View>
+        ) : null}
 
         <Text style={styles.label}>
           {activeSession ? "Odômetro atual para encerrar" : "Odômetro atual"}
@@ -164,19 +193,54 @@ export default function WorkSessionScreen({ navigation }: any) {
         <Text style={styles.help}>
           O turno é salvo primeiro no celular. Se estiver sem internet, a sincronização acontece depois.
         </Text>
-      </View>
+      </ScrollView>
     </SafeAreaView>
+  );
+}
+
+function Metric({
+  label,
+  value,
+  positive,
+  negative
+}: {
+  label: string;
+  value: string;
+  positive?: boolean;
+  negative?: boolean;
+}) {
+  return (
+    <View style={styles.metric}>
+      <Text style={styles.metricLabel}>{label}</Text>
+      <Text
+        style={[
+          styles.metricValue,
+          positive && styles.positive,
+          negative && styles.negative
+        ]}
+      >
+        {value}
+      </Text>
+    </View>
   );
 }
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: "#0F172A" },
   content: { padding: 20, gap: 12 },
-  card: { backgroundColor: "#1E293B", borderRadius: 16, padding: 20, marginBottom: 8 },
+  card: { backgroundColor: "#1E293B", borderRadius: 16, padding: 20, marginBottom: 2 },
   eyebrow: { color: "#38BDF8", fontSize: 12, fontWeight: "800", letterSpacing: 1 },
   title: { color: "#fff", fontSize: 28, fontWeight: "800", marginTop: 6 },
   subtitle: { color: "#94A3B8", marginTop: 6 },
   info: { color: "#CBD5E1", marginTop: 14, fontSize: 13 },
+  metricsCard: { backgroundColor: "#1E293B", borderRadius: 16, padding: 16, gap: 12 },
+  metricRow: { flexDirection: "row", gap: 10 },
+  metric: { flex: 1, backgroundColor: "#0F172A", borderRadius: 10, padding: 12 },
+  metricLabel: { color: "#94A3B8", fontSize: 11 },
+  metricValue: { color: "#fff", fontSize: 16, fontWeight: "800", marginTop: 4 },
+  positive: { color: "#22C55E" },
+  negative: { color: "#EF4444" },
+  metricsHelp: { color: "#64748B", fontSize: 11, lineHeight: 16 },
   label: { color: "#CBD5E1", fontSize: 13, fontWeight: "600" },
   input: {
     backgroundColor: "#1E293B",
