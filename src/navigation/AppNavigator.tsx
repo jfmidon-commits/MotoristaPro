@@ -9,6 +9,7 @@ import AddTransactionScreen from "@/screens/AddTransactionScreen";
 import TransactionsScreen from "@/screens/TransactionsScreen";
 import VehiclesScreen from "@/screens/VehiclesScreen";
 import MaintenanceScreen from "@/screens/MaintenanceScreen";
+import PreventiveMaintenanceScreen from "@/screens/PreventiveMaintenanceScreen";
 import SyncStatusScreen from "@/screens/SyncStatusScreen";
 import WorkSessionScreen from "@/screens/WorkSessionScreen";
 import WorkSessionHistoryScreen from "@/screens/WorkSessionHistoryScreen";
@@ -48,6 +49,7 @@ export default function AppNavigator() {
             <Stack.Screen name="Transactions" component={TransactionsScreen} options={{ title: "Transações" }} />
             <Stack.Screen name="Vehicles" component={VehiclesScreen} options={{ title: "Veículos" }} />
             <Stack.Screen name="Maintenance" component={MaintenanceScreen} options={{ title: "Manutenção" }} />
+            <Stack.Screen name="PreventiveMaintenance" component={PreventiveMaintenanceScreen} options={{ title: "Manutenção preventiva" }} />
             <Stack.Screen name="SyncStatus" component={SyncStatusScreen} options={{ title: "Status de Sincronização" }} />
           </>
         )}
