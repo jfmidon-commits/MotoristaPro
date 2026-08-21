@@ -4,25 +4,17 @@ import { getWorkSessionsBetween } from "@/services/WorkSessionService";
 import type { Transaction } from "@/types";
 
 export interface PeriodMetrics {
-  grossIncome: number; // centavos
-  totalExpense: number; // centavos
-  netProfit: number; // centavos
+  grossIncome: number;
+  totalExpense: number;
+  netProfit: number;
   totalKm: number;
   totalHours: number;
-  perHourCents: number | null; // lucro líquido / hora
-  perKmCents: number | null; // lucro líquido / km
-  costPerKmCents: number | null; // despesa / km (quanto custa rodar 1km)
+  perHourCents: number | null;
+  perKmCents: number | null;
+  costPerKmCents: number | null;
   transactionCount: number;
 }
 
-/**
- * Calcula métricas de um período com base nas transações (receita/despesa)
- * e nos turnos de trabalho encerrados (horas + km rodados via odômetro).
- *
- * Km e horas só existem se o usuário efetivamente usar "Iniciar/Encerrar turno"
- * com leitura de odômetro — sem isso, perHourCents/perKmCents ficam null
- * (mostramos isso na UI em vez de fingir uma métrica falsa).
- */
 export async function computeMetrics(
   userId: string,
   startIso: string,
@@ -30,8 +22,19 @@ export async function computeMetrics(
 ): Promise<PeriodMetrics> {
   const db = await getDb();
 
+  // Mantém as métricas alinhadas com a lista visível: uma transação com
+  // tombstone de deleção não entra no resultado enquanto aguarda o delete remoto.
   const transactions = await db.getAllAsync<Transaction>(
-    `SELECT * FROM transactions WHERE user_id = ? AND occurred_at >= ? AND occurred_at <= ?`,
+    `SELECT t.* FROM transactions t
+     WHERE t.user_id = ?
+       AND t.occurred_at >= ?
+       AND t.occurred_at <= ?
+       AND NOT EXISTS (
+         SELECT 1 FROM pending_deletes pd
+         WHERE pd.user_id = t.user_id
+           AND pd.table_name = 'transactions'
+           AND pd.record_id = t.id
+       )`,
     [userId, startIso, endIso]
   );
 
@@ -46,13 +49,15 @@ export async function computeMetrics(
 
   let totalHours = 0;
   let totalKm = 0;
-  for (const s of sessions) {
-    if (s.ended_at) {
-      const hours = (new Date(s.ended_at).getTime() - new Date(s.started_at).getTime()) / 3_600_000;
+  for (const session of sessions) {
+    if (session.ended_at) {
+      const hours =
+        (new Date(session.ended_at).getTime() - new Date(session.started_at).getTime()) /
+        3_600_000;
       if (hours > 0) totalHours += hours;
     }
-    if (s.start_odometer_km != null && s.end_odometer_km != null) {
-      const km = s.end_odometer_km - s.start_odometer_km;
+    if (session.start_odometer_km != null && session.end_odometer_km != null) {
+      const km = session.end_odometer_km - session.start_odometer_km;
       if (km > 0) totalKm += km;
     }
   }
@@ -88,13 +93,12 @@ export function endOfDayIso(date: Date = new Date()): string {
 
 export function startOfWeekIso(date: Date = new Date()): string {
   const d = new Date(date);
-  const day = d.getDay(); // 0 = domingo
+  const day = d.getDay();
   d.setDate(d.getDate() - day);
   d.setHours(0, 0, 0, 0);
   return d.toISOString();
 }
 
 export function startOfMonthIso(date: Date = new Date()): string {
-  const d = new Date(date.getFullYear(), date.getMonth(), 1);
-  return d.toISOString();
+  return new Date(date.getFullYear(), date.getMonth(), 1).toISOString();
 }
