@@ -267,7 +267,8 @@ function eventMatchesCategory(event: MaintenanceEvent, category: string): boolea
 export async function getPreventiveMaintenanceOverviewForVehicle(
   userId: string,
   vehicleId: string,
-  now: Date = new Date()
+  now: Date = new Date(),
+  includeInactive = false
 ): Promise<PreventiveMaintenanceOverview[]> {
   const [plans, events, currentOdometerKm] = await Promise.all([
     getPreventiveMaintenancePlans(userId, vehicleId),
@@ -275,25 +276,27 @@ export async function getPreventiveMaintenanceOverviewForVehicle(
     getLatestOdometerForVehicle(userId, vehicleId)
   ]);
 
-  return plans.map((plan) => {
-    const lastEvent = events.find((event) => eventMatchesCategory(event, plan.category)) ?? null;
-    const calculated = calculatePreventivePlanStatus({
-      intervalKm: plan.interval_km,
-      intervalDays: plan.interval_days,
-      warningKm: plan.warning_km,
-      warningDays: plan.warning_days,
-      lastOdometerKm: lastEvent?.odometer_km ?? null,
-      currentOdometerKm,
-      lastPerformedAt: lastEvent?.performed_at ?? null,
-      now
+  return plans
+    .filter((plan) => includeInactive || plan.is_active)
+    .map((plan) => {
+      const lastEvent = events.find((event) => eventMatchesCategory(event, plan.category)) ?? null;
+      const calculated = calculatePreventivePlanStatus({
+        intervalKm: plan.interval_km,
+        intervalDays: plan.interval_days,
+        warningKm: plan.warning_km,
+        warningDays: plan.warning_days,
+        lastOdometerKm: lastEvent?.odometer_km ?? null,
+        currentOdometerKm,
+        lastPerformedAt: lastEvent?.performed_at ?? null,
+        now
+      });
+      return {
+        plan,
+        lastEvent,
+        currentOdometerKm,
+        remainingKm: calculated.remainingKm,
+        remainingDays: calculated.remainingDays,
+        status: lastEvent ? calculated.status : "unknown"
+      };
     });
-    return {
-      plan,
-      lastEvent,
-      currentOdometerKm,
-      remainingKm: calculated.remainingKm,
-      remainingDays: calculated.remainingDays,
-      status: lastEvent ? calculated.status : "unknown"
-    };
-  });
 }
