@@ -19,10 +19,12 @@ import {
   type WorkSessionMetrics
 } from "@/services/WorkSessionMetricsService";
 import { getVehicles } from "@/services/VehicleService";
+import { getPreventiveMaintenanceOverviewForVehicle } from "@/services/PreventiveMaintenanceService";
 import { formatCentsToBRL } from "@/utils/formatters";
 import type { Vehicle, WorkSession } from "@/types";
 
 type PeriodKey = "today" | "week" | "month";
+type PreventiveSummary = { total: number; overdue: number; soon: number };
 
 function formatHours(hours: number): string {
   const totalMinutes = Math.round(hours * 60);
@@ -49,6 +51,7 @@ export default function DashboardScreen({ navigation }: any) {
   const [activeSession, setActiveSession] = useState<WorkSession | null>(null);
   const [sessionMetrics, setSessionMetrics] = useState<WorkSessionMetrics | null>(null);
   const [sessionVehicle, setSessionVehicle] = useState<Vehicle | null>(null);
+  const [preventiveSummary, setPreventiveSummary] = useState<PreventiveSummary>({ total: 0, overdue: 0, soon: 0 });
   const [refreshing, setRefreshing] = useState(false);
 
   const load = useCallback(async () => {
@@ -64,6 +67,16 @@ export default function DashboardScreen({ navigation }: any) {
     setActiveSession(session);
     setSessionVehicle(session?.vehicle_id ? vehicles.find((v) => v.id === session.vehicle_id) ?? null : null);
     setSessionMetrics(session ? await computeWorkSessionMetrics(user.id, session, now) : null);
+
+    const preventiveByVehicle = await Promise.all(
+      vehicles.map((vehicle) => getPreventiveMaintenanceOverviewForVehicle(user.id, vehicle.id, now))
+    );
+    const allPreventive = preventiveByVehicle.flat();
+    setPreventiveSummary({
+      total: allPreventive.length,
+      overdue: allPreventive.filter((item) => item.status === "overdue").length,
+      soon: allPreventive.filter((item) => item.status === "soon").length
+    });
   }, [period, user?.id]);
 
   useFocusEffect(
@@ -95,7 +108,10 @@ export default function DashboardScreen({ navigation }: any) {
     status.pendingVehicles +
     status.pendingMaintenance +
     status.pendingWorkSessions +
+    status.pendingPreventiveMaintenance +
     status.pendingDeletes;
+
+  const preventiveAttention = preventiveSummary.overdue + preventiveSummary.soon;
 
   return (
     <SafeAreaView style={styles.container} edges={["top"]}>
@@ -157,9 +173,7 @@ export default function DashboardScreen({ navigation }: any) {
               style={[styles.periodTab, period === key && styles.periodTabActive]}
               onPress={() => setPeriod(key)}
             >
-              <Text style={[styles.periodTabText, period === key && styles.periodTabTextActive]}>
-                {label}
-              </Text>
+              <Text style={[styles.periodTabText, period === key && styles.periodTabTextActive]}>{label}</Text>
             </Pressable>
           ))}
         </View>
@@ -174,35 +188,31 @@ export default function DashboardScreen({ navigation }: any) {
         </View>
 
         <View style={styles.metricsGrid}>
-          <View style={styles.metricCard}>
-            <Text style={styles.metricLabel}>Horas</Text>
-            <Text style={styles.metricValue}>
-              {metrics && metrics.totalHours > 0 ? formatHours(metrics.totalHours) : "—"}
-            </Text>
-          </View>
-          <View style={styles.metricCard}>
-            <Text style={styles.metricLabel}>Km rodados</Text>
-            <Text style={styles.metricValue}>
-              {metrics && metrics.totalKm > 0 ? `${metrics.totalKm.toFixed(0)} km` : "—"}
-            </Text>
-          </View>
-          <View style={styles.metricCard}>
-            <Text style={styles.metricLabel}>Lucro / hora</Text>
-            <Text style={styles.metricValue}>{moneyOrDash(metrics?.perHourCents ?? null)}</Text>
-          </View>
-          <View style={styles.metricCard}>
-            <Text style={styles.metricLabel}>Lucro / km</Text>
-            <Text style={styles.metricValue}>{moneyOrDash(metrics?.perKmCents ?? null)}</Text>
-          </View>
-          <View style={styles.metricCard}>
-            <Text style={styles.metricLabel}>Custo / km</Text>
-            <Text style={styles.metricValue}>{moneyOrDash(metrics?.costPerKmCents ?? null)}</Text>
-          </View>
-          <View style={styles.metricCard}>
-            <Text style={styles.metricLabel}>Lançamentos</Text>
-            <Text style={styles.metricValue}>{metrics?.transactionCount ?? 0}</Text>
-          </View>
+          <View style={styles.metricCard}><Text style={styles.metricLabel}>Horas</Text><Text style={styles.metricValue}>{metrics && metrics.totalHours > 0 ? formatHours(metrics.totalHours) : "—"}</Text></View>
+          <View style={styles.metricCard}><Text style={styles.metricLabel}>Km rodados</Text><Text style={styles.metricValue}>{metrics && metrics.totalKm > 0 ? `${metrics.totalKm.toFixed(0)} km` : "—"}</Text></View>
+          <View style={styles.metricCard}><Text style={styles.metricLabel}>Lucro / hora</Text><Text style={styles.metricValue}>{moneyOrDash(metrics?.perHourCents ?? null)}</Text></View>
+          <View style={styles.metricCard}><Text style={styles.metricLabel}>Lucro / km</Text><Text style={styles.metricValue}>{moneyOrDash(metrics?.perKmCents ?? null)}</Text></View>
+          <View style={styles.metricCard}><Text style={styles.metricLabel}>Custo / km</Text><Text style={styles.metricValue}>{moneyOrDash(metrics?.costPerKmCents ?? null)}</Text></View>
+          <View style={styles.metricCard}><Text style={styles.metricLabel}>Lançamentos</Text><Text style={styles.metricValue}>{metrics?.transactionCount ?? 0}</Text></View>
         </View>
+
+        <Pressable
+          style={[
+            styles.maintenanceSummary,
+            preventiveSummary.overdue > 0 && styles.maintenanceSummaryOverdue,
+            preventiveSummary.overdue === 0 && preventiveSummary.soon > 0 && styles.maintenanceSummarySoon
+          ]}
+          onPress={() => navigation.navigate("PreventiveMaintenance")}
+        >
+          <Text style={styles.maintenanceTitle}>Manutenção preventiva</Text>
+          <Text style={styles.maintenanceText}>
+            {preventiveSummary.total === 0
+              ? "Configure seus intervalos de manutenção →"
+              : preventiveAttention === 0
+                ? "Manutenção em dia →"
+                : `${preventiveAttention} item(ns) precisam de atenção • ${preventiveSummary.overdue} vencido(s) →`}
+          </Text>
+        </Pressable>
 
         <Pressable
           style={[styles.workButton, activeSession && styles.workButtonActive]}
@@ -216,36 +226,22 @@ export default function DashboardScreen({ navigation }: any) {
 
         <Pressable style={styles.syncStatus} onPress={() => navigation.navigate("SyncStatus")}>
           <Text style={styles.syncStatusText}>
-            {totalPending > 0
-              ? `${totalPending} item(ns) aguardando sincronização`
-              : "Tudo sincronizado"}
+            {totalPending > 0 ? `${totalPending} item(ns) aguardando sincronização` : "Tudo sincronizado"}
           </Text>
         </Pressable>
 
         <View style={styles.actions}>
-          <Pressable
-            style={[styles.actionButton, styles.incomeButton]}
-            onPress={() => navigation.navigate("AddTransaction", { type: "income" })}
-          >
+          <Pressable style={[styles.actionButton, styles.incomeButton]} onPress={() => navigation.navigate("AddTransaction", { type: "income" })}>
             <Text style={styles.actionButtonText}>+ Receita</Text>
           </Pressable>
-          <Pressable
-            style={[styles.actionButton, styles.expenseButton]}
-            onPress={() => navigation.navigate("AddTransaction", { type: "expense" })}
-          >
+          <Pressable style={[styles.actionButton, styles.expenseButton]} onPress={() => navigation.navigate("AddTransaction", { type: "expense" })}>
             <Text style={styles.actionButtonText}>- Despesa</Text>
           </Pressable>
         </View>
 
-        <Pressable style={styles.linkRow} onPress={() => navigation.navigate("Transactions")}>
-          <Text style={styles.linkText}>Transações →</Text>
-        </Pressable>
-        <Pressable style={styles.linkRow} onPress={() => navigation.navigate("Vehicles")}>
-          <Text style={styles.linkText}>Veículos →</Text>
-        </Pressable>
-        <Pressable style={styles.linkRow} onPress={() => navigation.navigate("Maintenance")}>
-          <Text style={styles.linkText}>Manutenção →</Text>
-        </Pressable>
+        <Pressable style={styles.linkRow} onPress={() => navigation.navigate("Transactions")}><Text style={styles.linkText}>Transações →</Text></Pressable>
+        <Pressable style={styles.linkRow} onPress={() => navigation.navigate("Vehicles")}><Text style={styles.linkText}>Veículos →</Text></Pressable>
+        <Pressable style={styles.linkRow} onPress={() => navigation.navigate("Maintenance")}><Text style={styles.linkText}>Manutenção →</Text></Pressable>
       </ScrollView>
     </SafeAreaView>
   );
@@ -253,23 +249,11 @@ export default function DashboardScreen({ navigation }: any) {
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: "#0F172A" },
-  header: {
-    flexDirection: "row",
-    justifyContent: "space-between",
-    alignItems: "center",
-    marginBottom: 18
-  },
+  header: { flexDirection: "row", justifyContent: "space-between", alignItems: "center", marginBottom: 18 },
   title: { color: "#fff", fontSize: 22, fontWeight: "800" },
   subtitle: { color: "#64748B", marginTop: 2, fontSize: 12 },
   logout: { color: "#F87171" },
-  activeSessionCard: {
-    backgroundColor: "#172554",
-    borderWidth: 1,
-    borderColor: "#22C55E",
-    borderRadius: 16,
-    padding: 16,
-    marginBottom: 14
-  },
+  activeSessionCard: { backgroundColor: "#172554", borderWidth: 1, borderColor: "#22C55E", borderRadius: 16, padding: 16, marginBottom: 14 },
   activeSessionHeader: { flexDirection: "row", justifyContent: "space-between", alignItems: "flex-start" },
   activeSessionEyebrow: { color: "#22C55E", fontSize: 12, fontWeight: "900", letterSpacing: 1 },
   activeSessionVehicle: { color: "#CBD5E1", fontSize: 13, marginTop: 4 },
@@ -294,6 +278,11 @@ const styles = StyleSheet.create({
   metricCard: { width: "48%", backgroundColor: "#1E293B", borderRadius: 12, padding: 14 },
   metricLabel: { color: "#94A3B8", fontSize: 12 },
   metricValue: { color: "#fff", fontWeight: "800", fontSize: 17, marginTop: 5 },
+  maintenanceSummary: { backgroundColor: "#1E293B", borderRadius: 14, padding: 15, marginBottom: 12, borderLeftWidth: 4, borderLeftColor: "#22C55E" },
+  maintenanceSummarySoon: { borderLeftColor: "#F59E0B" },
+  maintenanceSummaryOverdue: { borderLeftColor: "#EF4444" },
+  maintenanceTitle: { color: "#fff", fontWeight: "800" },
+  maintenanceText: { color: "#CBD5E1", marginTop: 4, fontSize: 13 },
   workButton: { backgroundColor: "#0EA5E9", borderRadius: 14, padding: 16, marginBottom: 12 },
   workButtonActive: { backgroundColor: "#F59E0B" },
   workButtonTitle: { color: "#082F49", fontSize: 16, fontWeight: "800" },
