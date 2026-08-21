@@ -32,21 +32,11 @@ function validateIntervals(params: {
   const hasKm = params.intervalKm != null;
   const hasDays = params.intervalDays != null;
 
-  if (!hasKm && !hasDays) {
-    throw new Error("Informe um intervalo em km ou dias.");
-  }
-  if (hasKm && (params.intervalKm as number) <= 0) {
-    throw new Error("Intervalo em km deve ser maior que zero.");
-  }
-  if (hasDays && (params.intervalDays as number) <= 0) {
-    throw new Error("Intervalo em dias deve ser maior que zero.");
-  }
-  if (params.warningKm != null && params.warningKm < 0) {
-    throw new Error("Aviso em km não pode ser negativo.");
-  }
-  if (params.warningDays != null && params.warningDays < 0) {
-    throw new Error("Aviso em dias não pode ser negativo.");
-  }
+  if (!hasKm && !hasDays) throw new Error("Informe um intervalo em km ou dias.");
+  if (hasKm && (params.intervalKm as number) <= 0) throw new Error("Intervalo em km deve ser maior que zero.");
+  if (hasDays && (params.intervalDays as number) <= 0) throw new Error("Intervalo em dias deve ser maior que zero.");
+  if (params.warningKm != null && params.warningKm < 0) throw new Error("Aviso em km não pode ser negativo.");
+  if (params.warningDays != null && params.warningDays < 0) throw new Error("Aviso em dias não pode ser negativo.");
 }
 
 function normalizeCategory(category: string): string {
@@ -67,7 +57,6 @@ export async function createPreventiveMaintenancePlan(params: {
   validateIntervals(params);
   const category = normalizeCategory(params.category);
   const db = await getDb();
-
   const vehicle = await db.getFirstAsync<{ id: string }>(
     `SELECT id FROM vehicles WHERE id = ? AND user_id = ? LIMIT 1`,
     [params.vehicleId, params.userId]
@@ -76,19 +65,10 @@ export async function createPreventiveMaintenancePlan(params: {
 
   const now = new Date().toISOString();
   const plan: PreventiveMaintenancePlan = {
-    id: uuidv4(),
-    user_id: params.userId,
-    vehicle_id: params.vehicleId,
-    category,
-    interval_km: params.intervalKm ?? null,
-    interval_days: params.intervalDays ?? null,
-    warning_km: params.warningKm ?? null,
-    warning_days: params.warningDays ?? null,
-    is_active: true,
-    created_at: now,
-    updated_at: now,
-    sync_state: "pending",
-    sync_error: null
+    id: uuidv4(), user_id: params.userId, vehicle_id: params.vehicleId, category,
+    interval_km: params.intervalKm ?? null, interval_days: params.intervalDays ?? null,
+    warning_km: params.warningKm ?? null, warning_days: params.warningDays ?? null,
+    is_active: true, created_at: now, updated_at: now, sync_state: "pending", sync_error: null
   };
 
   await db.runAsync(
@@ -96,20 +76,9 @@ export async function createPreventiveMaintenancePlan(params: {
       (id, user_id, vehicle_id, category, interval_km, interval_days, warning_km, warning_days,
        is_active, created_at, updated_at, sync_state, sync_error)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, 'pending', NULL)`,
-    [
-      plan.id,
-      plan.user_id,
-      plan.vehicle_id,
-      plan.category,
-      plan.interval_km,
-      plan.interval_days,
-      plan.warning_km,
-      plan.warning_days,
-      plan.created_at,
-      plan.updated_at
-    ]
+    [plan.id, plan.user_id, plan.vehicle_id, plan.category, plan.interval_km, plan.interval_days,
+      plan.warning_km, plan.warning_days, plan.created_at, plan.updated_at]
   );
-
   await syncPreventiveMaintenancePlan(plan);
   return plan;
 }
@@ -139,45 +108,29 @@ export async function updatePreventiveMaintenancePlan(params: {
     sync_state: "pending",
     sync_error: null
   };
-
   const db = await getDb();
   await db.runAsync(
     `UPDATE preventive_maintenance_plans
      SET category = ?, interval_km = ?, interval_days = ?, warning_km = ?, warning_days = ?,
          updated_at = ?, sync_state = 'pending', sync_error = NULL
      WHERE id = ? AND user_id = ?`,
-    [
-      updated.category,
-      updated.interval_km,
-      updated.interval_days,
-      updated.warning_km,
-      updated.warning_days,
-      updated.updated_at,
-      updated.id,
-      params.userId
-    ]
+    [updated.category, updated.interval_km, updated.interval_days, updated.warning_km,
+      updated.warning_days, updated.updated_at, updated.id, params.userId]
   );
-
   await syncPreventiveMaintenancePlan(updated);
   return updated;
 }
 
-export async function setPreventiveMaintenancePlanActive(
-  userId: string,
-  planId: string,
-  isActive: boolean
-): Promise<void> {
+export async function setPreventiveMaintenancePlanActive(userId: string, planId: string, isActive: boolean): Promise<void> {
   const existing = await getPreventiveMaintenancePlanById(userId, planId);
   if (!existing) throw new Error("Plano preventivo não encontrado.");
-
-  const updated = {
+  const updated: PreventiveMaintenancePlan = {
     ...existing,
     is_active: isActive,
     updated_at: new Date().toISOString(),
-    sync_state: "pending" as const,
+    sync_state: "pending",
     sync_error: null
   };
-
   const db = await getDb();
   await db.runAsync(
     `UPDATE preventive_maintenance_plans
@@ -199,12 +152,10 @@ export async function deletePreventiveMaintenancePlan(userId: string, planId: st
     await queueDelete({ userId, tableName: "preventive_maintenance_plans", recordId: planId });
     return;
   }
-
   const db = await getDb();
   await db.runAsync(`DELETE FROM preventive_maintenance_plans WHERE id = ? AND user_id = ?`, [planId, userId]);
   await db.runAsync(
-    `DELETE FROM pending_deletes
-     WHERE user_id = ? AND table_name = 'preventive_maintenance_plans' AND record_id = ?`,
+    `DELETE FROM pending_deletes WHERE user_id = ? AND table_name = 'preventive_maintenance_plans' AND record_id = ?`,
     [userId, planId]
   );
 }
@@ -212,78 +163,46 @@ export async function deletePreventiveMaintenancePlan(userId: string, planId: st
 export async function syncPreventiveMaintenancePlan(plan: PreventiveMaintenancePlan): Promise<void> {
   const { data: { session } } = await supabase.auth.getSession();
   if (!session?.user) return;
-
   const db = await getDb();
   if (session.user.id !== plan.user_id) {
-    await db.runAsync(
-      `UPDATE preventive_maintenance_plans SET sync_state = 'error', sync_error = ? WHERE id = ?`,
-      ["Plano pertence a outro usuário autenticado", plan.id]
-    );
+    await db.runAsync(`UPDATE preventive_maintenance_plans SET sync_state = 'error', sync_error = ? WHERE id = ?`,
+      ["Plano pertence a outro usuário autenticado", plan.id]);
     return;
   }
 
-  const { error } = await supabase.from("preventive_maintenance_plans").upsert(
-    {
-      id: plan.id,
-      user_id: plan.user_id,
-      vehicle_id: plan.vehicle_id,
-      category: plan.category,
-      interval_km: plan.interval_km,
-      interval_days: plan.interval_days,
-      warning_km: plan.warning_km,
-      warning_days: plan.warning_days,
-      is_active: plan.is_active,
-      created_at: plan.created_at,
-      updated_at: plan.updated_at
-    },
-    { onConflict: "id" }
-  );
+  const { error } = await supabase.from("preventive_maintenance_plans").upsert({
+    id: plan.id, user_id: plan.user_id, vehicle_id: plan.vehicle_id, category: plan.category,
+    interval_km: plan.interval_km, interval_days: plan.interval_days, warning_km: plan.warning_km,
+    warning_days: plan.warning_days, is_active: plan.is_active, created_at: plan.created_at, updated_at: plan.updated_at
+  }, { onConflict: "id" });
 
   if (error) {
-    await db.runAsync(
-      `UPDATE preventive_maintenance_plans SET sync_state = 'error', sync_error = ? WHERE id = ?`,
-      [error.message, plan.id]
-    );
+    await db.runAsync(`UPDATE preventive_maintenance_plans SET sync_state = 'error', sync_error = ? WHERE id = ?`,
+      [error.message, plan.id]);
     return;
   }
 
   const { data: confirmRow, error: confirmError } = await supabase
-    .from("preventive_maintenance_plans")
-    .select("id")
-    .eq("id", plan.id)
-    .maybeSingle();
-
+    .from("preventive_maintenance_plans").select("id").eq("id", plan.id).maybeSingle();
   if (confirmError || !confirmRow) {
-    await db.runAsync(
-      `UPDATE preventive_maintenance_plans SET sync_state = 'error', sync_error = ? WHERE id = ?`,
-      [confirmError?.message ?? "Plano não encontrado após sincronização", plan.id]
-    );
+    await db.runAsync(`UPDATE preventive_maintenance_plans SET sync_state = 'error', sync_error = ? WHERE id = ?`,
+      [confirmError?.message ?? "Plano não encontrado após sincronização", plan.id]);
     return;
   }
-
-  await db.runAsync(
-    `UPDATE preventive_maintenance_plans SET sync_state = 'synced', sync_error = NULL WHERE id = ?`,
-    [plan.id]
-  );
+  await db.runAsync(`UPDATE preventive_maintenance_plans SET sync_state = 'synced', sync_error = NULL WHERE id = ?`, [plan.id]);
 }
 
-export async function getPreventiveMaintenancePlans(
-  userId: string,
-  vehicleId?: string
-): Promise<PreventiveMaintenancePlan[]> {
+export async function getPreventiveMaintenancePlans(userId: string, vehicleId?: string): Promise<PreventiveMaintenancePlan[]> {
   const db = await getDb();
   const args: (string | number)[] = [userId];
   const vehicleFilter = vehicleId ? ` AND p.vehicle_id = ?` : "";
   if (vehicleId) args.push(vehicleId);
-
   const rows = await db.getAllAsync<PreventivePlanRow>(
     `SELECT p.* FROM preventive_maintenance_plans p
      WHERE p.user_id = ?${vehicleFilter}
        AND NOT EXISTS (
          SELECT 1 FROM pending_deletes pd
-         WHERE pd.user_id = p.user_id
-           AND pd.table_name = 'preventive_maintenance_plans'
-           AND pd.record_id = p.id
+         WHERE pd.user_id = p.user_id AND pd.table_name = 'preventive_maintenance_plans' AND pd.record_id = p.id
        )
      ORDER BY p.is_active DESC, p.category ASC`,
     args
@@ -291,19 +210,14 @@ export async function getPreventiveMaintenancePlans(
   return rows.map(mapPlanRow);
 }
 
-export async function getPreventiveMaintenancePlanById(
-  userId: string,
-  planId: string
-): Promise<PreventiveMaintenancePlan | null> {
+export async function getPreventiveMaintenancePlanById(userId: string, planId: string): Promise<PreventiveMaintenancePlan | null> {
   const db = await getDb();
   const row = await db.getFirstAsync<PreventivePlanRow>(
     `SELECT p.* FROM preventive_maintenance_plans p
      WHERE p.user_id = ? AND p.id = ?
        AND NOT EXISTS (
          SELECT 1 FROM pending_deletes pd
-         WHERE pd.user_id = p.user_id
-           AND pd.table_name = 'preventive_maintenance_plans'
-           AND pd.record_id = p.id
+         WHERE pd.user_id = p.user_id AND pd.table_name = 'preventive_maintenance_plans' AND pd.record_id = p.id
        )
      LIMIT 1`,
     [userId, planId]
@@ -311,18 +225,14 @@ export async function getPreventiveMaintenancePlanById(
   return row ? mapPlanRow(row) : null;
 }
 
-export async function getPendingPreventiveMaintenancePlans(
-  userId: string
-): Promise<PreventiveMaintenancePlan[]> {
+export async function getPendingPreventiveMaintenancePlans(userId: string): Promise<PreventiveMaintenancePlan[]> {
   const db = await getDb();
   const rows = await db.getAllAsync<PreventivePlanRow>(
     `SELECT p.* FROM preventive_maintenance_plans p
      WHERE p.user_id = ? AND p.sync_state != 'synced'
        AND NOT EXISTS (
          SELECT 1 FROM pending_deletes pd
-         WHERE pd.user_id = p.user_id
-           AND pd.table_name = 'preventive_maintenance_plans'
-           AND pd.record_id = p.id
+         WHERE pd.user_id = p.user_id AND pd.table_name = 'preventive_maintenance_plans' AND pd.record_id = p.id
        )
      ORDER BY p.updated_at ASC`,
     [userId]
@@ -330,10 +240,7 @@ export async function getPendingPreventiveMaintenancePlans(
   return rows.map(mapPlanRow);
 }
 
-export async function getLatestOdometerForVehicle(
-  userId: string,
-  vehicleId: string
-): Promise<number | null> {
+export async function getLatestOdometerForVehicle(userId: string, vehicleId: string): Promise<number | null> {
   const db = await getDb();
   const row = await db.getFirstAsync<{ odometer_km: number | null }>(
     `SELECT MAX(value) AS odometer_km FROM (
@@ -352,7 +259,9 @@ export async function getLatestOdometerForVehicle(
 }
 
 function eventMatchesCategory(event: MaintenanceEvent, category: string): boolean {
-  return event.description === category || event.description.startsWith(`${category} —`);
+  return event.description === category ||
+    event.description.startsWith(`${category} —`) ||
+    event.description === `Outros — ${category}`;
 }
 
 export async function getPreventiveMaintenanceOverviewForVehicle(
@@ -366,28 +275,25 @@ export async function getPreventiveMaintenanceOverviewForVehicle(
     getLatestOdometerForVehicle(userId, vehicleId)
   ]);
 
-  return plans
-    .filter((plan) => plan.is_active)
-    .map((plan) => {
-      const lastEvent = events.find((event) => eventMatchesCategory(event, plan.category)) ?? null;
-      const calculated = calculatePreventivePlanStatus({
-        intervalKm: plan.interval_km,
-        intervalDays: plan.interval_days,
-        warningKm: plan.warning_km,
-        warningDays: plan.warning_days,
-        lastOdometerKm: lastEvent?.odometer_km ?? null,
-        currentOdometerKm,
-        lastPerformedAt: lastEvent?.performed_at ?? null,
-        now
-      });
-
-      return {
-        plan,
-        lastEvent,
-        currentOdometerKm,
-        remainingKm: calculated.remainingKm,
-        remainingDays: calculated.remainingDays,
-        status: lastEvent ? calculated.status : "unknown"
-      };
+  return plans.map((plan) => {
+    const lastEvent = events.find((event) => eventMatchesCategory(event, plan.category)) ?? null;
+    const calculated = calculatePreventivePlanStatus({
+      intervalKm: plan.interval_km,
+      intervalDays: plan.interval_days,
+      warningKm: plan.warning_km,
+      warningDays: plan.warning_days,
+      lastOdometerKm: lastEvent?.odometer_km ?? null,
+      currentOdometerKm,
+      lastPerformedAt: lastEvent?.performed_at ?? null,
+      now
     });
+    return {
+      plan,
+      lastEvent,
+      currentOdometerKm,
+      remainingKm: calculated.remainingKm,
+      remainingDays: calculated.remainingDays,
+      status: lastEvent ? calculated.status : "unknown"
+    };
+  });
 }
