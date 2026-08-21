@@ -1,19 +1,32 @@
 import { getDb } from "@/lib/database";
 import { supabase } from "@/lib/supabase";
-import type { MaintenanceEvent, Transaction, Vehicle, WorkSession } from "@/types";
+import type {
+  MaintenanceEvent,
+  PreventiveMaintenancePlan,
+  Transaction,
+  Vehicle,
+  WorkSession
+} from "@/types";
 
 type RemoteVehicle = Omit<Vehicle, "sync_state" | "sync_error">;
 type RemoteTransaction = Omit<Transaction, "sync_state" | "sync_error">;
 type RemoteMaintenanceEvent = Omit<MaintenanceEvent, "sync_state" | "sync_error">;
 type RemoteWorkSession = Omit<WorkSession, "sync_state" | "sync_error">;
+type RemotePreventivePlan = Omit<PreventiveMaintenancePlan, "sync_state" | "sync_error">;
 
-type SyncTable = "vehicles" | "transactions" | "maintenance_events" | "work_sessions";
+type SyncTable =
+  | "vehicles"
+  | "transactions"
+  | "maintenance_events"
+  | "work_sessions"
+  | "preventive_maintenance_plans";
 
 export type PullSyncResult = {
   vehicles: number;
   transactions: number;
   maintenance: number;
   workSessions: number;
+  preventiveMaintenance: number;
   removed: number;
 };
 
@@ -51,8 +64,6 @@ async function reconcileRemoteDeletes(
   let removed = 0;
   for (const local of localSynced) {
     if (remoteIds.has(local.id)) continue;
-    // Nunca remova um registro com intenção local de delete ainda pendente;
-    // processPendingDeletes é responsável por finalizar esse fluxo.
     if (await hasPendingDelete(userId, tableName, local.id)) continue;
     await db.runAsync(`DELETE FROM ${tableName} WHERE id = ? AND user_id = ? AND sync_state = 'synced'`, [
       local.id,
@@ -69,25 +80,44 @@ export async function pullRemoteState(userId: string): Promise<PullSyncResult> {
     throw new Error("Sessão autenticada inválida para sincronização remota.");
   }
 
-  const [vehiclesResult, transactionsResult, maintenanceResult, workSessionsResult] = await Promise.all([
+  const [
+    vehiclesResult,
+    transactionsResult,
+    maintenanceResult,
+    workSessionsResult,
+    preventiveResult
+  ] = await Promise.all([
     supabase.from("vehicles").select("*").eq("user_id", userId),
     supabase.from("transactions").select("*").eq("user_id", userId),
     supabase.from("maintenance_events").select("*").eq("user_id", userId),
-    supabase.from("work_sessions").select("*").eq("user_id", userId)
+    supabase.from("work_sessions").select("*").eq("user_id", userId),
+    supabase.from("preventive_maintenance_plans").select("*").eq("user_id", userId)
   ]);
 
-  const firstError = vehiclesResult.error ?? transactionsResult.error ?? maintenanceResult.error ?? workSessionsResult.error;
+  const firstError =
+    vehiclesResult.error ??
+    transactionsResult.error ??
+    maintenanceResult.error ??
+    workSessionsResult.error ??
+    preventiveResult.error;
   if (firstError) throw new Error(firstError.message);
 
   const remoteVehicles = (vehiclesResult.data ?? []) as RemoteVehicle[];
   const remoteTransactions = (transactionsResult.data ?? []) as RemoteTransaction[];
   const remoteMaintenance = (maintenanceResult.data ?? []) as RemoteMaintenanceEvent[];
   const remoteWorkSessions = (workSessionsResult.data ?? []) as RemoteWorkSession[];
+  const remotePreventive = (preventiveResult.data ?? []) as RemotePreventivePlan[];
 
   const db = await getDb();
-  const result: PullSyncResult = { vehicles: 0, transactions: 0, maintenance: 0, workSessions: 0, removed: 0 };
+  const result: PullSyncResult = {
+    vehicles: 0,
+    transactions: 0,
+    maintenance: 0,
+    workSessions: 0,
+    preventiveMaintenance: 0,
+    removed: 0
+  };
 
-  // Veículos vêm primeiro para preservar as FKs das demais tabelas durante inserts.
   for (const remote of remoteVehicles) {
     const local = await db.getFirstAsync<{ sync_state: string }>(
       `SELECT sync_state FROM vehicles WHERE id = ? AND user_id = ?`, [remote.id, userId]
@@ -153,15 +183,54 @@ export async function pullRemoteState(userId: string): Promise<PullSyncResult> {
          vehicle_id = excluded.vehicle_id, started_at = excluded.started_at, ended_at = excluded.ended_at,
          start_odometer_km = excluded.start_odometer_km, end_odometer_km = excluded.end_odometer_km,
          created_at = excluded.created_at, sync_state = 'synced', sync_error = NULL`,
-      [remote.id, userId, remote.vehicle_id, remote.started_at, remote.ended_at,
-        remote.start_odometer_km, remote.end_odometer_km, remote.created_at]
+      [
+        remote.id,
+        userId,
+        remote.vehicle_id,
+        remote.started_at,
+        remote.ended_at,
+        remote.start_odometer_km,
+        remote.end_odometer_km,
+        remote.created_at
+      ]
     );
     result.workSessions += 1;
   }
 
-  // Depois dos upserts, refletimos deleções feitas em outro aparelho. Apenas
-  // registros locais já sincronizados podem ser removidos: pending/error ficam intactos.
-  // Filhos são reconciliados antes de vehicles para respeitar foreign keys.
+  for (const remote of remotePreventive) {
+    const local = await db.getFirstAsync<{ sync_state: string }>(
+      `SELECT sync_state FROM preventive_maintenance_plans WHERE id = ? AND user_id = ?`,
+      [remote.id, userId]
+    );
+    if (!(await shouldAcceptRemote(userId, "preventive_maintenance_plans", remote.id, local?.sync_state))) continue;
+    await db.runAsync(
+      `INSERT INTO preventive_maintenance_plans
+       (id, user_id, vehicle_id, category, interval_km, interval_days, warning_km, warning_days,
+        is_active, created_at, updated_at, sync_state, sync_error)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'synced', NULL)
+       ON CONFLICT(id) DO UPDATE SET
+         vehicle_id = excluded.vehicle_id, category = excluded.category,
+         interval_km = excluded.interval_km, interval_days = excluded.interval_days,
+         warning_km = excluded.warning_km, warning_days = excluded.warning_days,
+         is_active = excluded.is_active, created_at = excluded.created_at, updated_at = excluded.updated_at,
+         sync_state = 'synced', sync_error = NULL`,
+      [
+        remote.id,
+        userId,
+        remote.vehicle_id,
+        remote.category,
+        remote.interval_km,
+        remote.interval_days,
+        remote.warning_km,
+        remote.warning_days,
+        remote.is_active ? 1 : 0,
+        remote.created_at,
+        remote.updated_at
+      ]
+    );
+    result.preventiveMaintenance += 1;
+  }
+
   result.removed += await reconcileRemoteDeletes(
     userId, "transactions", new Set(remoteTransactions.map((item) => item.id))
   );
@@ -170,6 +239,9 @@ export async function pullRemoteState(userId: string): Promise<PullSyncResult> {
   );
   result.removed += await reconcileRemoteDeletes(
     userId, "work_sessions", new Set(remoteWorkSessions.map((item) => item.id))
+  );
+  result.removed += await reconcileRemoteDeletes(
+    userId, "preventive_maintenance_plans", new Set(remotePreventive.map((item) => item.id))
   );
   result.removed += await reconcileRemoteDeletes(
     userId, "vehicles", new Set(remoteVehicles.map((item) => item.id))
