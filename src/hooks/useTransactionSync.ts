@@ -24,8 +24,6 @@ type RetryMeta = {
   lastAttemptAt: number;
 };
 
-// Controle em memória apenas para cadenciar retries durante a sessão atual.
-// O estado persistente continua sendo sync_state/sync_error no SQLite.
 const retryMeta = new Map<string, RetryMeta>();
 
 function canRetryTransaction(id: string, force: boolean): boolean {
@@ -47,13 +45,6 @@ function registerTransactionAttempt(id: string) {
   });
 }
 
-/**
- * Reprocessa entidades pendentes e deleções quando:
- * - o app volta pro foreground;
- * - a conexão volta;
- * - o usuário loga;
- * - chamado manualmente via syncNow().
- */
 export function useTransactionSync() {
   const { user, isAuthenticated } = useAuth();
   const [status, setStatus] = useState<SyncStatusSnapshot>({
@@ -102,11 +93,10 @@ export function useTransactionSync() {
       setStatus((s) => ({ ...s, lastSyncAttemptAt: new Date().toISOString() }));
 
       try {
-        // Deleções primeiro para não reenviar registros que o usuário já removeu.
-        await processPendingDeletes(user.id);
+        // No modo manual também reprocessa tombstones que já atingiram o limite automático.
+        await processPendingDeletes(user.id, { force });
 
         const pendingTx = await getPendingTransactions(user.id);
-        console.log("[SYNC] reprocessando", pendingTx.length, "transações pendentes");
         for (const tx of pendingTx) {
           if (!canRetryTransaction(tx.id, force)) continue;
           registerTransactionAttempt(tx.id);
@@ -114,19 +104,16 @@ export function useTransactionSync() {
         }
 
         const pendingVeh = await getPendingVehicles(user.id);
-        console.log("[SYNC] reprocessando", pendingVeh.length, "veículos pendentes");
         for (const vehicle of pendingVeh) {
           await syncVehicle(vehicle);
         }
 
         const pendingMaint = await getPendingMaintenanceEvents(user.id);
-        console.log("[SYNC] reprocessando", pendingMaint.length, "manutenções pendentes");
         for (const maintenance of pendingMaint) {
           await syncMaintenanceEvent(maintenance);
         }
 
         const pendingWs = await getPendingWorkSessions(user.id);
-        console.log("[SYNC] reprocessando", pendingWs.length, "turnos pendentes");
         for (const workSession of pendingWs) {
           await syncWorkSession(workSession);
         }
@@ -139,7 +126,6 @@ export function useTransactionSync() {
           getPendingDeletes(user.id)
         ]);
 
-        // Limpa metadados de retry das transações que já sincronizaram.
         const stillPendingIds = new Set(stillTx.map((tx) => tx.id));
         for (const id of retryMeta.keys()) {
           if (!stillPendingIds.has(id)) retryMeta.delete(id);
@@ -199,7 +185,6 @@ export function useTransactionSync() {
     });
     const netSub = NetInfo.addEventListener((state) => {
       if (state.isConnected && state.isInternetReachable !== false) {
-        console.log("[SYNC] conexão restaurada, tentando sincronizar");
         syncNow();
       }
     });
