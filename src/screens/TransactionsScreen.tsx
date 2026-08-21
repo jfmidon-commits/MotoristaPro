@@ -44,6 +44,9 @@ export default function TransactionsScreen() {
   }
 
   function confirmDelete(item: Transaction) {
+    if (!user?.id) return;
+    const userId = user.id;
+
     Alert.alert(
       "Excluir transação",
       `Excluir "${item.category}" de ${formatCentsToBRL(item.amount)}?`,
@@ -53,7 +56,7 @@ export default function TransactionsScreen() {
           text: "Excluir",
           style: "destructive",
           onPress: async () => {
-            await deleteTransaction(user.id, item.id);
+            await deleteTransaction(userId, item.id);
             setTransactions((prev) => prev.filter((t) => t.id !== item.id));
           }
         }
