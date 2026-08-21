@@ -28,6 +28,9 @@ export async function addMaintenanceEvent(params: {
   if (params.costInCents < 0) {
     throw new Error("Custo da manutenção não pode ser negativo.");
   }
+  if (params.odometerKm !== undefined && params.odometerKm < 0) {
+    throw new Error("Odômetro da manutenção não pode ser negativo.");
+  }
 
   const db = await getDb();
 
@@ -49,13 +52,14 @@ export async function addMaintenanceEvent(params: {
     odometer_km: params.odometerKm ?? null,
     performed_at: (params.performedAt ?? new Date()).toISOString(),
     created_at: new Date().toISOString(),
-    sync_state: "pending"
+    sync_state: "pending",
+    sync_error: null
   };
 
   await db.runAsync(
     `INSERT INTO maintenance_events
-      (id, user_id, vehicle_id, description, cost, odometer_km, performed_at, created_at, sync_state)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      (id, user_id, vehicle_id, description, cost, odometer_km, performed_at, created_at, sync_state, sync_error)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       event.id,
       event.user_id,
@@ -65,7 +69,8 @@ export async function addMaintenanceEvent(params: {
       event.odometer_km,
       event.performed_at,
       event.created_at,
-      event.sync_state
+      event.sync_state,
+      event.sync_error
     ]
   );
 
@@ -96,11 +101,13 @@ export async function syncMaintenanceEvent(event: MaintenanceEvent): Promise<voi
   const db = await getDb();
   if (error) {
     console.log("[SUPABASE] erro ao sincronizar manutenção", error);
-    await db.runAsync(`UPDATE maintenance_events SET sync_state = 'error', sync_error = ? WHERE id = ?`, [error.message, event.id]);
+    await db.runAsync(`UPDATE maintenance_events SET sync_state = 'error', sync_error = ? WHERE id = ?`, [
+      error.message,
+      event.id
+    ]);
     return;
   }
 
-  // SELECT de confirmação (padrão consistente)
   const { data: confirmRow, error: selectError } = await supabase
     .from("maintenance_events")
     .select("id")
@@ -116,14 +123,21 @@ export async function syncMaintenanceEvent(event: MaintenanceEvent): Promise<voi
     return;
   }
 
-  await db.runAsync(`UPDATE maintenance_events SET sync_state = 'synced', sync_error = NULL WHERE id = ?`, [event.id]);
+  await db.runAsync(`UPDATE maintenance_events SET sync_state = 'synced', sync_error = NULL WHERE id = ?`, [
+    event.id
+  ]);
 }
 
-export async function getMaintenanceEvents(vehicleId: string): Promise<MaintenanceEvent[]> {
+export async function getMaintenanceEvents(
+  userId: string,
+  vehicleId: string
+): Promise<MaintenanceEvent[]> {
   const db = await getDb();
   return db.getAllAsync<MaintenanceEvent>(
-    `SELECT * FROM maintenance_events WHERE vehicle_id = ? ORDER BY performed_at DESC`,
-    [vehicleId]
+    `SELECT * FROM maintenance_events
+     WHERE user_id = ? AND vehicle_id = ?
+     ORDER BY performed_at DESC`,
+    [userId, vehicleId]
   );
 }
 
