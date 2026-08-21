@@ -1,4 +1,5 @@
 import { getDb } from "@/lib/database";
+import { calculateDerivedMetrics } from "@/services/DerivedMetrics";
 import { getWorkSessionsBetween } from "@/services/WorkSessionService";
 import type { Transaction } from "@/types";
 
@@ -40,7 +41,6 @@ export async function computeMetrics(
   const totalExpense = transactions
     .filter((t) => t.type === "expense")
     .reduce((sum, t) => sum + t.amount, 0);
-  const netProfit = grossIncome - totalExpense;
 
   const sessions = await getWorkSessionsBetween(userId, startIso, endIso);
 
@@ -57,15 +57,19 @@ export async function computeMetrics(
     }
   }
 
+  const derived = calculateDerivedMetrics({
+    grossIncome,
+    totalExpense,
+    totalHours,
+    totalKm
+  });
+
   return {
     grossIncome,
     totalExpense,
-    netProfit,
+    ...derived,
     totalKm,
     totalHours,
-    perHourCents: totalHours > 0 ? Math.round(netProfit / totalHours) : null,
-    perKmCents: totalKm > 0 ? Math.round(netProfit / totalKm) : null,
-    costPerKmCents: totalKm > 0 ? Math.round(totalExpense / totalKm) : null,
     transactionCount: transactions.length
   };
 }
