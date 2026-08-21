@@ -4,6 +4,18 @@ import { getDb } from "@/lib/database";
 import { supabase } from "@/lib/supabase";
 import type { Vehicle } from "@/types";
 
+type VehicleRow = Omit<Vehicle, "is_default"> & {
+  is_default: number | boolean;
+};
+
+function mapVehicleRow(row: VehicleRow): Vehicle {
+  return {
+    ...row,
+    is_default: row.is_default === true || row.is_default === 1,
+    sync_error: row.sync_error ?? null
+  };
+}
+
 /**
  * createVehicle() é EXCLUSIVO para veículos. Nunca deve ser usado como
  * atalho para gerar um id de veículo "placeholder" pra manutenção.
@@ -23,7 +35,8 @@ export async function createVehicle(params: {
     plate: params.plate ?? null,
     is_default: params.isDefault ?? false,
     created_at: new Date().toISOString(),
-    sync_state: "pending"
+    sync_state: "pending",
+    sync_error: null
   };
 
   if (vehicle.is_default) {
@@ -31,8 +44,8 @@ export async function createVehicle(params: {
   }
 
   await db.runAsync(
-    `INSERT INTO vehicles (id, user_id, name, plate, is_default, created_at, sync_state)
-     VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO vehicles (id, user_id, name, plate, is_default, created_at, sync_state, sync_error)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       vehicle.id,
       vehicle.user_id,
@@ -40,7 +53,8 @@ export async function createVehicle(params: {
       vehicle.plate,
       vehicle.is_default ? 1 : 0,
       vehicle.created_at,
-      vehicle.sync_state
+      vehicle.sync_state,
+      vehicle.sync_error
     ]
   );
 
@@ -69,11 +83,13 @@ export async function syncVehicle(vehicle: Vehicle): Promise<void> {
   const db = await getDb();
   if (error) {
     console.log("[SUPABASE] erro ao sincronizar veículo", error);
-    await db.runAsync(`UPDATE vehicles SET sync_state = 'error', sync_error = ? WHERE id = ?`, [error.message, vehicle.id]);
+    await db.runAsync(`UPDATE vehicles SET sync_state = 'error', sync_error = ? WHERE id = ?`, [
+      error.message,
+      vehicle.id
+    ]);
     return;
   }
 
-  // SELECT de confirmação (padrão consistente com TransactionService)
   const { data: confirmRow, error: selectError } = await supabase
     .from("vehicles")
     .select("id")
@@ -89,30 +105,34 @@ export async function syncVehicle(vehicle: Vehicle): Promise<void> {
     return;
   }
 
-  await db.runAsync(`UPDATE vehicles SET sync_state = 'synced', sync_error = NULL WHERE id = ?`, [vehicle.id]);
+  await db.runAsync(`UPDATE vehicles SET sync_state = 'synced', sync_error = NULL WHERE id = ?`, [
+    vehicle.id
+  ]);
 }
 
 export async function getVehicles(userId: string): Promise<Vehicle[]> {
   const db = await getDb();
-  return db.getAllAsync<Vehicle>(
+  const rows = await db.getAllAsync<VehicleRow>(
     `SELECT * FROM vehicles WHERE user_id = ? ORDER BY created_at ASC`,
     [userId]
   );
+  return rows.map(mapVehicleRow);
 }
 
 export async function getDefaultVehicle(userId: string): Promise<Vehicle | null> {
   const db = await getDb();
-  const row = await db.getFirstAsync<Vehicle>(
+  const row = await db.getFirstAsync<VehicleRow>(
     `SELECT * FROM vehicles WHERE user_id = ? AND is_default = 1 LIMIT 1`,
     [userId]
   );
-  return row ?? null;
+  return row ? mapVehicleRow(row) : null;
 }
 
 export async function getPendingVehicles(userId: string): Promise<Vehicle[]> {
   const db = await getDb();
-  return db.getAllAsync<Vehicle>(
+  const rows = await db.getAllAsync<VehicleRow>(
     `SELECT * FROM vehicles WHERE user_id = ? AND sync_state != 'synced' ORDER BY created_at ASC`,
     [userId]
   );
+  return rows.map(mapVehicleRow);
 }
