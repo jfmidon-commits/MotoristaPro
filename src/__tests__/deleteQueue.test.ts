@@ -115,6 +115,28 @@ describe("fila de deleção offline", () => {
     expect(sqlCalls.some((sql) => sql.includes("DELETE FROM pending_deletes"))).toBe(true);
   });
 
+  it("processa tombstone de plano preventivo pela mesma fila genérica", async () => {
+    const db = createDbMock();
+    db.getAllAsync.mockResolvedValue([
+      {
+        ...pendingDelete,
+        id: "pd-plan",
+        table_name: "preventive_maintenance_plans",
+        record_id: "plan-1"
+      }
+    ]);
+    mockedGetDb.mockResolvedValue(db as never);
+    const remote = mockRemoteDelete(null);
+
+    await processPendingDeletes("user-1");
+
+    expect(mockedFrom).toHaveBeenCalledWith("preventive_maintenance_plans");
+    expect(remote.eq).toHaveBeenCalledWith("id", "plan-1");
+    expect(
+      db.runAsync.mock.calls.some((call) => String(call[0]).includes("DELETE FROM preventive_maintenance_plans"))
+    ).toBe(true);
+  });
+
   it("modo force consulta também tombstones que atingiram o limite automático", async () => {
     const db = createDbMock();
     db.getAllAsync.mockResolvedValue([]);
