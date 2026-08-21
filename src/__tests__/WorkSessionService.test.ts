@@ -12,14 +12,14 @@ import { supabase } from "@/lib/supabase";
 import {
   startWorkSession,
   endWorkSession,
-  getActiveWorkSession
+  getActiveWorkSession,
+  getRecentWorkSessions,
+  getWorkSessionById
 } from "@/services/WorkSessionService";
 import type { WorkSession } from "@/types";
 
 const mockedGetDb = getDb as jest.MockedFunction<typeof getDb>;
-const mockedGetSession = supabase.auth.getSession as jest.MockedFunction<
-  typeof supabase.auth.getSession
->;
+const mockedGetSession = supabase.auth.getSession as jest.MockedFunction<typeof supabase.auth.getSession>;
 
 function createDbMock() {
   return {
@@ -42,13 +42,18 @@ const activeSession: WorkSession = {
   sync_error: null
 };
 
+const completedSession: WorkSession = {
+  ...activeSession,
+  id: "completed-session",
+  ended_at: "2026-08-21T14:00:00.000Z",
+  end_odometer_km: 1080,
+  sync_state: "synced"
+};
+
 describe("WorkSessionService", () => {
   beforeEach(() => {
     jest.clearAllMocks();
-    mockedGetSession.mockResolvedValue({
-      data: { session: null },
-      error: null
-    } as never);
+    mockedGetSession.mockResolvedValue({ data: { session: null }, error: null } as never);
   });
 
   it("rejeita um segundo turno quando já existe turno aberto", async () => {
@@ -56,10 +61,8 @@ describe("WorkSessionService", () => {
     db.getFirstAsync.mockResolvedValue(activeSession);
     mockedGetDb.mockResolvedValue(db as never);
 
-    await expect(
-      startWorkSession({ userId: "user-1", vehicleId: "vehicle-1", startOdometerKm: 1000 })
-    ).rejects.toThrow("Já existe um turno em aberto");
-
+    await expect(startWorkSession({ userId: "user-1", vehicleId: "vehicle-1", startOdometerKm: 1000 }))
+      .rejects.toThrow("Já existe um turno em aberto");
     expect(db.runAsync).not.toHaveBeenCalled();
   });
 
@@ -68,10 +71,8 @@ describe("WorkSessionService", () => {
     db.getFirstAsync.mockResolvedValue(null);
     mockedGetDb.mockResolvedValue(db as never);
 
-    await expect(
-      startWorkSession({ userId: "user-1", vehicleId: null, startOdometerKm: -1 })
-    ).rejects.toThrow("Odômetro inicial não pode ser negativo");
-
+    await expect(startWorkSession({ userId: "user-1", vehicleId: null, startOdometerKm: -1 }))
+      .rejects.toThrow("Odômetro inicial não pode ser negativo");
     expect(db.runAsync).not.toHaveBeenCalled();
   });
 
@@ -80,12 +81,7 @@ describe("WorkSessionService", () => {
     db.getFirstAsync.mockResolvedValue(null);
     mockedGetDb.mockResolvedValue(db as never);
 
-    const result = await startWorkSession({
-      userId: "user-1",
-      vehicleId: "vehicle-1",
-      startOdometerKm: 1234
-    });
-
+    const result = await startWorkSession({ userId: "user-1", vehicleId: "vehicle-1", startOdometerKm: 1234 });
     expect(result).toMatchObject({
       id: "work-session-test-id",
       user_id: "user-1",
@@ -103,10 +99,8 @@ describe("WorkSessionService", () => {
     db.getFirstAsync.mockResolvedValue(activeSession);
     mockedGetDb.mockResolvedValue(db as never);
 
-    await expect(
-      endWorkSession({ sessionId: activeSession.id, endOdometerKm: 999 })
-    ).rejects.toThrow("Odômetro final não pode ser menor que o inicial");
-
+    await expect(endWorkSession({ sessionId: activeSession.id, endOdometerKm: 999 }))
+      .rejects.toThrow("Odômetro final não pode ser menor que o inicial");
     expect(db.runAsync).not.toHaveBeenCalled();
   });
 
@@ -114,7 +108,24 @@ describe("WorkSessionService", () => {
     const db = createDbMock();
     db.getFirstAsync.mockResolvedValue(activeSession);
     mockedGetDb.mockResolvedValue(db as never);
-
     await expect(getActiveWorkSession("user-1")).resolves.toEqual(activeSession);
+  });
+
+  it("busca detalhe de turno sempre limitado ao usuário", async () => {
+    const db = createDbMock();
+    db.getFirstAsync.mockResolvedValue(completedSession);
+    mockedGetDb.mockResolvedValue(db as never);
+
+    await expect(getWorkSessionById("user-1", "completed-session")).resolves.toEqual(completedSession);
+    expect(db.getFirstAsync).toHaveBeenCalledWith(expect.stringContaining("user_id = ?"), ["completed-session", "user-1"]);
+  });
+
+  it("lista somente turnos encerrados e limita o histórico", async () => {
+    const db = createDbMock();
+    db.getAllAsync.mockResolvedValue([completedSession]);
+    mockedGetDb.mockResolvedValue(db as never);
+
+    await expect(getRecentWorkSessions("user-1", 500)).resolves.toEqual([completedSession]);
+    expect(db.getAllAsync).toHaveBeenCalledWith(expect.stringContaining("ended_at IS NOT NULL"), ["user-1", 100]);
   });
 });
