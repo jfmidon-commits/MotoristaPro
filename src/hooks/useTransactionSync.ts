@@ -10,6 +10,10 @@ import {
 import { syncVehicle, getPendingVehicles } from "@/services/VehicleService";
 import { syncMaintenanceEvent, getPendingMaintenanceEvents } from "@/services/MaintenanceService";
 import { syncWorkSession, getPendingWorkSessions } from "@/services/WorkSessionService";
+import {
+  getPendingPreventiveMaintenancePlans,
+  syncPreventiveMaintenancePlan
+} from "@/services/PreventiveMaintenanceService";
 import { pullRemoteState } from "@/services/PullSyncService";
 import { useAuth } from "@/context/AuthContext";
 import type { SyncStatusSnapshot } from "@/types";
@@ -40,6 +44,7 @@ export function useTransactionSync() {
     pendingVehicles: 0,
     pendingMaintenance: 0,
     pendingWorkSessions: 0,
+    pendingPreventiveMaintenance: 0,
     pendingDeletes: 0,
     lastSyncAttemptAt: null,
     lastSyncSuccessAt: null,
@@ -49,12 +54,23 @@ export function useTransactionSync() {
 
   const updateStatus = useCallback(async () => {
     if (!user?.id) return;
-    const [tx, veh, maint, ws, del] = await Promise.all([
-      getPendingTransactions(user.id), getPendingVehicles(user.id),
-      getPendingMaintenanceEvents(user.id), getPendingWorkSessions(user.id), getPendingDeletes(user.id)
+    const [tx, veh, maint, ws, preventive, del] = await Promise.all([
+      getPendingTransactions(user.id),
+      getPendingVehicles(user.id),
+      getPendingMaintenanceEvents(user.id),
+      getPendingWorkSessions(user.id),
+      getPendingPreventiveMaintenancePlans(user.id),
+      getPendingDeletes(user.id)
     ]);
-    setStatus((s) => ({ ...s, pendingTransactions: tx.length, pendingVehicles: veh.length,
-      pendingMaintenance: maint.length, pendingWorkSessions: ws.length, pendingDeletes: del.length }));
+    setStatus((s) => ({
+      ...s,
+      pendingTransactions: tx.length,
+      pendingVehicles: veh.length,
+      pendingMaintenance: maint.length,
+      pendingWorkSessions: ws.length,
+      pendingPreventiveMaintenance: preventive.length,
+      pendingDeletes: del.length
+    }));
   }, [user?.id]);
 
   const syncNow = useCallback(async (opts?: { force?: boolean }) => {
@@ -67,7 +83,6 @@ export function useTransactionSync() {
     setStatus((s) => ({ ...s, lastSyncAttemptAt: new Date().toISOString() }));
 
     try {
-      // Push local primeiro: preserva alterações offline e tombstones antes de baixar o remoto.
       await processPendingDeletes(user.id, { force });
       const pendingTx = await getPendingTransactions(user.id);
       for (const tx of pendingTx) {
@@ -78,27 +93,47 @@ export function useTransactionSync() {
       for (const vehicle of await getPendingVehicles(user.id)) await syncVehicle(vehicle);
       for (const maintenance of await getPendingMaintenanceEvents(user.id)) await syncMaintenanceEvent(maintenance);
       for (const workSession of await getPendingWorkSessions(user.id)) await syncWorkSession(workSession);
+      for (const plan of await getPendingPreventiveMaintenancePlans(user.id)) {
+        await syncPreventiveMaintenancePlan(plan);
+      }
 
-      // Pull depois do push. O serviço nunca sobrescreve registros ainda pending/error nem tombstones locais.
       await pullRemoteState(user.id);
 
-      const [stillTx, stillVeh, stillMaint, stillWs, stillDeletes] = await Promise.all([
-        getPendingTransactions(user.id), getPendingVehicles(user.id), getPendingMaintenanceEvents(user.id),
-        getPendingWorkSessions(user.id), getPendingDeletes(user.id)
+      const [stillTx, stillVeh, stillMaint, stillWs, stillPreventive, stillDeletes] = await Promise.all([
+        getPendingTransactions(user.id),
+        getPendingVehicles(user.id),
+        getPendingMaintenanceEvents(user.id),
+        getPendingWorkSessions(user.id),
+        getPendingPreventiveMaintenancePlans(user.id),
+        getPendingDeletes(user.id)
       ]);
       const stillPendingIds = new Set(stillTx.map((tx) => tx.id));
       for (const id of retryMeta.keys()) if (!stillPendingIds.has(id)) retryMeta.delete(id);
 
-      const totalPending = stillTx.length + stillVeh.length + stillMaint.length + stillWs.length + stillDeletes.length;
-      const exhaustedTransactions = stillTx.filter((tx) => (retryMeta.get(tx.id)?.attempts ?? 0) >= MAX_ATTEMPTS);
+      const totalPending =
+        stillTx.length +
+        stillVeh.length +
+        stillMaint.length +
+        stillWs.length +
+        stillPreventive.length +
+        stillDeletes.length;
+      const exhaustedTransactions = stillTx.filter(
+        (tx) => (retryMeta.get(tx.id)?.attempts ?? 0) >= MAX_ATTEMPTS
+      );
       setStatus((s) => ({
         ...s,
-        pendingTransactions: stillTx.length, pendingVehicles: stillVeh.length,
-        pendingMaintenance: stillMaint.length, pendingWorkSessions: stillWs.length, pendingDeletes: stillDeletes.length,
+        pendingTransactions: stillTx.length,
+        pendingVehicles: stillVeh.length,
+        pendingMaintenance: stillMaint.length,
+        pendingWorkSessions: stillWs.length,
+        pendingPreventiveMaintenance: stillPreventive.length,
+        pendingDeletes: stillDeletes.length,
         lastSyncSuccessAt: totalPending === 0 ? new Date().toISOString() : s.lastSyncSuccessAt,
         lastError: exhaustedTransactions.length > 0
           ? `${exhaustedTransactions.length} transação(ões) atingiram o limite automático de tentativas. Toque em "Sincronizar agora" para tentar novamente.`
-          : totalPending > 0 ? `${totalPending} item(ns) ainda aguardam sincronização.` : null
+          : totalPending > 0
+            ? `${totalPending} item(ns) ainda aguardam sincronização.`
+            : null
       }));
     } catch (err: any) {
       console.log("[SYNC] erro inesperado no syncNow", err);
@@ -114,15 +149,27 @@ export function useTransactionSync() {
   }, [syncNow]);
 
   useEffect(() => {
-    if (isAuthenticated) { updateStatus(); syncNow(); }
+    retryMeta.clear();
+  }, [user?.id]);
+
+  useEffect(() => {
+    if (isAuthenticated) {
+      updateStatus();
+      syncNow();
+    }
   }, [isAuthenticated, syncNow, updateStatus]);
 
   useEffect(() => {
-    const appStateSub = AppState.addEventListener("change", (nextState) => { if (nextState === "active") syncNow(); });
+    const appStateSub = AppState.addEventListener("change", (nextState) => {
+      if (nextState === "active") syncNow();
+    });
     const netSub = NetInfo.addEventListener((state) => {
       if (state.isConnected && state.isInternetReachable !== false) syncNow();
     });
-    return () => { appStateSub.remove(); netSub(); };
+    return () => {
+      appStateSub.remove();
+      netSub();
+    };
   }, [syncNow]);
 
   return { status, syncNow: forceSyncNow };
