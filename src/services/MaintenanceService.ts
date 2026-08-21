@@ -25,6 +25,10 @@ export async function addMaintenanceEvent(params: {
   odometerKm?: number;
   performedAt?: Date;
 }): Promise<MaintenanceEvent> {
+  if (params.costInCents < 0) {
+    throw new Error("Custo da manutenção não pode ser negativo.");
+  }
+
   const db = await getDb();
 
   let vehicleId = params.vehicleId;
@@ -92,10 +96,27 @@ export async function syncMaintenanceEvent(event: MaintenanceEvent): Promise<voi
   const db = await getDb();
   if (error) {
     console.log("[SUPABASE] erro ao sincronizar manutenção", error);
-    await db.runAsync(`UPDATE maintenance_events SET sync_state = 'error' WHERE id = ?`, [event.id]);
+    await db.runAsync(`UPDATE maintenance_events SET sync_state = 'error', sync_error = ? WHERE id = ?`, [error.message, event.id]);
     return;
   }
-  await db.runAsync(`UPDATE maintenance_events SET sync_state = 'synced' WHERE id = ?`, [event.id]);
+
+  // SELECT de confirmação (padrão consistente)
+  const { data: confirmRow, error: selectError } = await supabase
+    .from("maintenance_events")
+    .select("id")
+    .eq("id", event.id)
+    .maybeSingle();
+
+  if (selectError || !confirmRow) {
+    console.log("[SUPABASE] SELECT de confirmação falhou para manutenção", selectError);
+    await db.runAsync(`UPDATE maintenance_events SET sync_state = 'error', sync_error = ? WHERE id = ?`, [
+      selectError?.message ?? "Registro não encontrado após insert",
+      event.id
+    ]);
+    return;
+  }
+
+  await db.runAsync(`UPDATE maintenance_events SET sync_state = 'synced', sync_error = NULL WHERE id = ?`, [event.id]);
 }
 
 export async function getMaintenanceEvents(vehicleId: string): Promise<MaintenanceEvent[]> {
@@ -103,5 +124,13 @@ export async function getMaintenanceEvents(vehicleId: string): Promise<Maintenan
   return db.getAllAsync<MaintenanceEvent>(
     `SELECT * FROM maintenance_events WHERE vehicle_id = ? ORDER BY performed_at DESC`,
     [vehicleId]
+  );
+}
+
+export async function getPendingMaintenanceEvents(userId: string): Promise<MaintenanceEvent[]> {
+  const db = await getDb();
+  return db.getAllAsync<MaintenanceEvent>(
+    `SELECT * FROM maintenance_events WHERE user_id = ? AND sync_state != 'synced' ORDER BY created_at ASC`,
+    [userId]
   );
 }

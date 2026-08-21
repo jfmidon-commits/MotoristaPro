@@ -69,17 +69,35 @@ export async function syncVehicle(vehicle: Vehicle): Promise<void> {
   const db = await getDb();
   if (error) {
     console.log("[SUPABASE] erro ao sincronizar veículo", error);
-    await db.runAsync(`UPDATE vehicles SET sync_state = 'error' WHERE id = ?`, [vehicle.id]);
+    await db.runAsync(`UPDATE vehicles SET sync_state = 'error', sync_error = ? WHERE id = ?`, [error.message, vehicle.id]);
     return;
   }
-  await db.runAsync(`UPDATE vehicles SET sync_state = 'synced' WHERE id = ?`, [vehicle.id]);
+
+  // SELECT de confirmação (padrão consistente com TransactionService)
+  const { data: confirmRow, error: selectError } = await supabase
+    .from("vehicles")
+    .select("id")
+    .eq("id", vehicle.id)
+    .maybeSingle();
+
+  if (selectError || !confirmRow) {
+    console.log("[SUPABASE] SELECT de confirmação falhou para veículo", selectError);
+    await db.runAsync(`UPDATE vehicles SET sync_state = 'error', sync_error = ? WHERE id = ?`, [
+      selectError?.message ?? "Registro não encontrado após insert",
+      vehicle.id
+    ]);
+    return;
+  }
+
+  await db.runAsync(`UPDATE vehicles SET sync_state = 'synced', sync_error = NULL WHERE id = ?`, [vehicle.id]);
 }
 
 export async function getVehicles(userId: string): Promise<Vehicle[]> {
   const db = await getDb();
-  return db.getAllAsync<Vehicle>(`SELECT * FROM vehicles WHERE user_id = ? ORDER BY created_at ASC`, [
-    userId
-  ]);
+  return db.getAllAsync<Vehicle>(
+    `SELECT * FROM vehicles WHERE user_id = ? ORDER BY created_at ASC`,
+    [userId]
+  );
 }
 
 export async function getDefaultVehicle(userId: string): Promise<Vehicle | null> {
@@ -89,4 +107,12 @@ export async function getDefaultVehicle(userId: string): Promise<Vehicle | null>
     [userId]
   );
   return row ?? null;
+}
+
+export async function getPendingVehicles(userId: string): Promise<Vehicle[]> {
+  const db = await getDb();
+  return db.getAllAsync<Vehicle>(
+    `SELECT * FROM vehicles WHERE user_id = ? AND sync_state != 'synced' ORDER BY created_at ASC`,
+    [userId]
+  );
 }
