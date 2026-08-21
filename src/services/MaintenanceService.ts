@@ -7,10 +7,18 @@ import type { MaintenanceEvent } from "@/types";
 
 export const MAINTENANCE_CATEGORIES = [
   "Troca de óleo",
+  "Filtro de óleo",
+  "Filtro de ar",
+  "Filtro de combustível",
   "Pneus",
-  "Filtros",
+  "Rodízio de pneus",
   "Freios",
+  "Alinhamento",
+  "Balanceamento",
   "Revisão",
+  "Correia",
+  "Fluido de freio",
+  "Líquido de arrefecimento",
   "Lavagem/estética",
   "Outros"
 ] as const;
@@ -24,10 +32,6 @@ export interface PreventiveMaintenanceStatus {
   remainingDays: number | null;
 }
 
-/**
- * Helper puro para futuras regras de manutenção preventiva.
- * Não persiste plano nem gera manutenção automaticamente.
- */
 export function calculatePreventiveMaintenanceStatus(params: {
   lastOdometerKm?: number | null;
   currentOdometerKm?: number | null;
@@ -70,11 +74,6 @@ export class NoVehicleError extends Error {
   }
 }
 
-/**
- * addMaintenanceEvent() SEMPRE exige um vehicle_id real (não usa UUID
- * placeholder). Se o usuário não tem veículo cadastrado ainda, lança
- * NoVehicleError pra UI mostrar o fluxo de criação de veículo primeiro.
- */
 export async function addMaintenanceEvent(params: {
   userId: string;
   vehicleId?: string;
