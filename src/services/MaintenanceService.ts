@@ -5,6 +5,64 @@ import { supabase } from "@/lib/supabase";
 import { getDefaultVehicle } from "@/services/VehicleService";
 import type { MaintenanceEvent } from "@/types";
 
+export const MAINTENANCE_CATEGORIES = [
+  "Troca de óleo",
+  "Pneus",
+  "Filtros",
+  "Freios",
+  "Revisão",
+  "Lavagem/estética",
+  "Outros"
+] as const;
+
+export type MaintenanceCategory = (typeof MAINTENANCE_CATEGORIES)[number];
+
+export interface PreventiveMaintenanceStatus {
+  dueByKm: boolean;
+  dueByDate: boolean;
+  remainingKm: number | null;
+  remainingDays: number | null;
+}
+
+/**
+ * Helper puro para futuras regras de manutenção preventiva.
+ * Não persiste plano nem gera manutenção automaticamente.
+ */
+export function calculatePreventiveMaintenanceStatus(params: {
+  lastOdometerKm?: number | null;
+  currentOdometerKm?: number | null;
+  intervalKm?: number | null;
+  lastPerformedAt?: string | null;
+  now?: Date;
+  intervalDays?: number | null;
+}): PreventiveMaintenanceStatus {
+  let remainingKm: number | null = null;
+  if (
+    params.lastOdometerKm != null &&
+    params.currentOdometerKm != null &&
+    params.intervalKm != null &&
+    params.intervalKm > 0
+  ) {
+    remainingKm = params.lastOdometerKm + params.intervalKm - params.currentOdometerKm;
+  }
+
+  let remainingDays: number | null = null;
+  if (params.lastPerformedAt && params.intervalDays != null && params.intervalDays > 0) {
+    const performedAtMs = new Date(params.lastPerformedAt).getTime();
+    if (Number.isFinite(performedAtMs)) {
+      const dueAtMs = performedAtMs + params.intervalDays * 86_400_000;
+      remainingDays = Math.ceil((dueAtMs - (params.now ?? new Date()).getTime()) / 86_400_000);
+    }
+  }
+
+  return {
+    dueByKm: remainingKm != null && remainingKm <= 0,
+    dueByDate: remainingDays != null && remainingDays <= 0,
+    remainingKm,
+    remainingDays
+  };
+}
+
 export class NoVehicleError extends Error {
   constructor() {
     super("Nenhum veículo cadastrado. Cadastre um veículo antes de lançar manutenção.");
@@ -32,6 +90,11 @@ export async function addMaintenanceEvent(params: {
     throw new Error("Odômetro da manutenção não pode ser negativo.");
   }
 
+  const description = params.description.trim();
+  if (!description) {
+    throw new Error("Descrição da manutenção é obrigatória.");
+  }
+
   const db = await getDb();
 
   let vehicleId = params.vehicleId;
@@ -47,7 +110,7 @@ export async function addMaintenanceEvent(params: {
     id: uuidv4(),
     user_id: params.userId,
     vehicle_id: vehicleId,
-    description: params.description,
+    description,
     cost: params.costInCents,
     odometer_km: params.odometerKm ?? null,
     performed_at: (params.performedAt ?? new Date()).toISOString(),
