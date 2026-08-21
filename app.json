@@ -1,0 +1,25 @@
+{
+  "expo": {
+    "name": "MotoristaPro",
+    "slug": "motorista-pro",
+    "version": "0.1.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "automatic",
+    "scheme": "motoristapro",
+    "ios": {
+      "supportsTablet": false,
+      "bundleIdentifier": "com.motoristapro.app"
+    },
+    "android": {
+      "package": "com.motoristapro.app",
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/adaptive-icon.png",
+        "backgroundColor": "#0F172A"
+      }
+    },
+    "plugins": [],
+    "extra": {
+      "eas": {}
+    }
+  }
+}
