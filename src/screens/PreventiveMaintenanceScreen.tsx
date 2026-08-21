@@ -47,6 +47,7 @@ function parseOptionalPositive(value: string): number | null {
 }
 
 function statusText(item: PreventiveMaintenanceOverview): string {
+  if (!item.plan.is_active) return "PAUSADO";
   switch (item.status) {
     case "overdue": return "VENCIDO";
     case "soon": return "EM BREVE";
@@ -56,6 +57,7 @@ function statusText(item: PreventiveMaintenanceOverview): string {
 }
 
 function remainingText(item: PreventiveMaintenanceOverview): string {
+  if (!item.plan.is_active) return "Plano pausado. Reative para voltar aos alertas.";
   if (item.status === "unknown") return "Registre a primeira manutenção desta categoria.";
   const parts: string[] = [];
   if (item.remainingKm != null) {
@@ -90,7 +92,11 @@ export default function PreventiveMaintenanceScreen({ navigation }: any) {
       vehicleRows[0] ??
       null;
     setSelectedVehicleId(selected?.id ?? null);
-    setOverview(selected ? await getPreventiveMaintenanceOverviewForVehicle(user.id, selected.id) : []);
+    setOverview(
+      selected
+        ? await getPreventiveMaintenanceOverviewForVehicle(user.id, selected.id, new Date(), true)
+        : []
+    );
   }, [selectedVehicleId, user?.id]);
 
   useFocusEffect(useCallback(() => { load(); }, [load]));
@@ -98,7 +104,7 @@ export default function PreventiveMaintenanceScreen({ navigation }: any) {
   async function selectVehicle(vehicleId: string) {
     if (!user?.id) return;
     setSelectedVehicleId(vehicleId);
-    setOverview(await getPreventiveMaintenanceOverviewForVehicle(user.id, vehicleId));
+    setOverview(await getPreventiveMaintenanceOverviewForVehicle(user.id, vehicleId, new Date(), true));
   }
 
   function applyCategory(next: string) {
@@ -243,7 +249,14 @@ export default function PreventiveMaintenanceScreen({ navigation }: any) {
           selectedVehicleId ? <Text style={styles.emptyText}>Nenhum plano preventivo configurado para este veículo.</Text> : null
         }
         renderItem={({ item }) => (
-          <View style={[styles.planCard, item.status === "overdue" && styles.overdueCard, item.status === "soon" && styles.soonCard]}>
+          <View
+            style={[
+              styles.planCard,
+              !item.plan.is_active && styles.pausedCard,
+              item.plan.is_active && item.status === "overdue" && styles.overdueCard,
+              item.plan.is_active && item.status === "soon" && styles.soonCard
+            ]}
+          >
             <View style={styles.planHeader}>
               <View style={{ flex: 1 }}>
                 <Text style={styles.planTitle}>{item.plan.category}</Text>
@@ -304,6 +317,7 @@ const styles = StyleSheet.create({
   emptyCard: { backgroundColor: "#422006", borderRadius: 10, padding: 14 },
   emptyText: { color: "#94A3B8", textAlign: "center", marginVertical: 14 },
   planCard: { backgroundColor: "#1E293B", borderRadius: 14, padding: 15, marginBottom: 12, borderLeftWidth: 4, borderLeftColor: "#22C55E" },
+  pausedCard: { borderLeftColor: "#64748B", opacity: 0.8 },
   soonCard: { borderLeftColor: "#F59E0B" },
   overdueCard: { borderLeftColor: "#EF4444" },
   planHeader: { flexDirection: "row", alignItems: "center" },
