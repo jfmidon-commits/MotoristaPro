@@ -1,104 +1,64 @@
-import { calculateDerivedMetrics } from "@/services/DerivedMetrics";
+jest.mock("@/lib/database", () => ({ getDb: jest.fn() }));
+jest.mock("@/lib/supabase", () => ({
+  supabase: {
+    auth: { getSession: jest.fn() },
+    from: jest.fn()
+  }
+}));
+jest.mock("@/services/VehicleService", () => ({
+  getDefaultVehicle: jest.fn()
+}));
+jest.mock("uuid", () => ({ v4: () => "validation-test-id" }));
 
-describe("calculateDerivedMetrics", () => {
-  it("calcula lucro e métricas por hora/km", () => {
-    expect(
-      calculateDerivedMetrics({
-        grossIncome: 10_000,
-        totalExpense: 2_500,
-        totalHours: 2,
-        totalKm: 50
+import { getDb } from "@/lib/database";
+import { addTransaction } from "@/services/TransactionService";
+import { addMaintenanceEvent } from "@/services/MaintenanceService";
+
+const mockedGetDb = getDb as jest.MockedFunction<typeof getDb>;
+
+describe("validações de entrada dos services", () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  it("TransactionService rejeita valor negativo antes de acessar SQLite", async () => {
+    await expect(
+      addTransaction({
+        userId: "user-1",
+        vehicleId: null,
+        type: "income",
+        category: "Corrida",
+        amountInCents: -1
       })
-    ).toEqual({
-      netProfit: 7_500,
-      perHourCents: 3_750,
-      perKmCents: 150,
-      costPerKmCents: 50
-    });
+    ).rejects.toThrow("Valor da transação não pode ser negativo");
+
+    expect(mockedGetDb).not.toHaveBeenCalled();
   });
 
-  it("retorna null quando não há horas nem km", () => {
-    expect(
-      calculateDerivedMetrics({
-        grossIncome: 10_000,
-        totalExpense: 2_500,
-        totalHours: 0,
-        totalKm: 0
+  it("MaintenanceService rejeita custo negativo antes de acessar SQLite", async () => {
+    await expect(
+      addMaintenanceEvent({
+        userId: "user-1",
+        vehicleId: "vehicle-1",
+        description: "Troca de óleo",
+        costInCents: -1
       })
-    ).toEqual({
-      netProfit: 7_500,
-      perHourCents: null,
-      perKmCents: null,
-      costPerKmCents: null
-    });
+    ).rejects.toThrow("Custo da manutenção não pode ser negativo");
+
+    expect(mockedGetDb).not.toHaveBeenCalled();
   });
 
-  it("mantém resultado negativo quando despesas superam receita", () => {
-    expect(
-      calculateDerivedMetrics({
-        grossIncome: 2_000,
-        totalExpense: 5_000,
-        totalHours: 2,
-        totalKm: 100
+  it("MaintenanceService rejeita odômetro negativo antes de acessar SQLite", async () => {
+    await expect(
+      addMaintenanceEvent({
+        userId: "user-1",
+        vehicleId: "vehicle-1",
+        description: "Troca de óleo",
+        costInCents: 10_000,
+        odometerKm: -5
       })
-    ).toEqual({
-      netProfit: -3_000,
-      perHourCents: -1_500,
-      perKmCents: -30,
-      costPerKmCents: 50
-    });
-  });
-});
+    ).rejects.toThrow("Odômetro da manutenção não pode ser negativo");
 
-describe("Validações de constraints (lógica pura)", () => {
-  it("rejeita amount negativo em transação", () => {
-    const amount = -100;
-    expect(amount < 0).toBe(true);
-  });
-
-  it("rejeita cost negativo em manutenção", () => {
-    const cost = -50;
-    expect(cost < 0).toBe(true);
-  });
-
-  it("rejeita start_odometer negativo", () => {
-    const startOdometer = -10;
-    expect(startOdometer < 0).toBe(true);
-  });
-
-  it("rejeita end_odometer negativo", () => {
-    const endOdometer = -5;
-    expect(endOdometer < 0).toBe(true);
-  });
-
-  it("rejeita end_odometer < start_odometer", () => {
-    const start = 100;
-    const end = 50;
-    expect(end < start).toBe(true);
-  });
-
-  it("aceita valores válidos de odômetro", () => {
-    const start = 100;
-    const end = 150;
-    expect(end >= start && start >= 0 && end >= 0).toBe(true);
-  });
-});
-
-describe("Fila de deleção (lógica)", () => {
-  it("registro com pending_delete deve ser filtrado em leituras", () => {
-    const hasPendingDelete = true;
-    expect(hasPendingDelete).toBe(true);
-  });
-
-  it("retry de delete incrementa attempts mas mantém elegível", () => {
-    const attempts = 2;
-    const maxAttempts = 5;
-    expect(attempts < maxAttempts).toBe(true);
-  });
-
-  it("delete bem sucedido remove da fila e do local", () => {
-    const remoteSuccess = true;
-    const localRemoved = true;
-    expect(remoteSuccess && localRemoved).toBe(true);
+    expect(mockedGetDb).not.toHaveBeenCalled();
   });
 });
