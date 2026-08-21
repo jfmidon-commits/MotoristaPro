@@ -1,29 +1,26 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { AppState } from "react-native";
 import NetInfo from "@react-native-community/netinfo";
-import { createTransaction, getPendingTransactions } from "@/services/TransactionService";
+import { createTransaction, getPendingTransactions, processPendingDeletes, getPendingDeletes } from "@/services/TransactionService";
+import { syncVehicle, getPendingVehicles } from "@/services/VehicleService";
+import { syncMaintenanceEvent, getPendingMaintenanceEvents } from "@/services/MaintenanceService";
+import { syncWorkSession, getPendingWorkSessions } from "@/services/WorkSessionService";
 import { useAuth } from "@/context/AuthContext";
 import type { SyncStatusSnapshot } from "@/types";
 
 const MAX_ATTEMPTS = 5;
-// Backoff exponencial simples: 5s, 10s, 20s, 40s, 80s
 const BASE_DELAY_MS = 5000;
 
-// Contador de tentativas em memória por id de transação (não precisa persistir:
-// se o app reiniciar, é razoável dar mais uma chance do zero).
+// Contador de tentativas em memória por id de transação
 const attemptCounts = new Map<string, number>();
 
 /**
- * Reprocessa transações pendentes/com erro quando:
+ * Reprocessa entidades pendentes (transactions, vehicles, maintenance, work_sessions)
+ * e deleções pendentes quando:
  * - o app volta pro foreground;
  * - a conexão volta (NetInfo);
  * - o usuário loga;
  * - chamado manualmente via `syncNow()`.
- *
- * Não roda em polling constante — sync é orientado a evento pra não gastar
- * bateria/dados à toa. Transações que falham repetidamente (MAX_ATTEMPTS)
- * ficam marcadas como erro permanente e param de ser retentadas automaticamente,
- * exigindo ação manual do usuário (botão "Sincronizar agora").
  */
 export function useTransactionSync() {
   const { user, isAuthenticated } = useAuth();
@@ -31,11 +28,32 @@ export function useTransactionSync() {
     pendingTransactions: 0,
     pendingVehicles: 0,
     pendingMaintenance: 0,
+    pendingWorkSessions: 0,
+    pendingDeletes: 0,
     lastSyncAttemptAt: null,
     lastSyncSuccessAt: null,
     lastError: null
   });
   const isSyncing = useRef(false);
+
+  const updateStatus = useCallback(async () => {
+    if (!user?.id) return;
+    const [tx, veh, maint, ws, del] = await Promise.all([
+      getPendingTransactions(user.id),
+      getPendingVehicles(user.id),
+      getPendingMaintenanceEvents(user.id),
+      getPendingWorkSessions(user.id),
+      getPendingDeletes(user.id)
+    ]);
+    setStatus(s => ({
+      ...s,
+      pendingTransactions: tx.length,
+      pendingVehicles: veh.length,
+      pendingMaintenance: maint.length,
+      pendingWorkSessions: ws.length,
+      pendingDeletes: del.length
+    }));
+  }, [user?.id]);
 
   const syncNow = useCallback(
     async (opts?: { force?: boolean }) => {
@@ -51,27 +69,49 @@ export function useTransactionSync() {
       setStatus((s) => ({ ...s, lastSyncAttemptAt: new Date().toISOString() }));
 
       try {
-        const pending = await getPendingTransactions(user.id);
-        console.log("[SYNC] useTransactionSync: reprocessando", pending.length, "transações pendentes");
+        // 1. Processar deleções pendentes primeiro
+        await processPendingDeletes(user.id);
 
-        for (const tx of pending) {
+        // 2. Transações pendentes
+        const pendingTx = await getPendingTransactions(user.id);
+        console.log("[SYNC] reprocessando", pendingTx.length, "transações pendentes");
+        for (const tx of pendingTx) {
           const attempts = attemptCounts.get(tx.id) ?? 0;
-
           if (!opts?.force && attempts >= MAX_ATTEMPTS) {
             console.log("[SYNC] limite de tentativas atingido, pulando", tx.id);
             continue;
           }
-
           if (!opts?.force && attempts > 0) {
-            // respeita o backoff: só tenta de novo depois do delay esperado
             const delay = BASE_DELAY_MS * Math.pow(2, attempts - 1);
             const elapsed = Date.now() - new Date(tx.created_at).getTime();
             if (elapsed < delay) continue;
           }
-
           attemptCounts.set(tx.id, attempts + 1);
           await createTransaction(tx);
         }
+
+        // 3. Veículos pendentes
+        const pendingVeh = await getPendingVehicles(user.id);
+        console.log("[SYNC] reprocessando", pendingVeh.length, "veículos pendentes");
+        for (const v of pendingVeh) {
+          await syncVehicle(v);
+        }
+
+        // 4. Manutenções pendentes
+        const pendingMaint = await getPendingMaintenanceEvents(user.id);
+        console.log("[SYNC] reprocessando", pendingMaint.length, "manutenções pendentes");
+        for (const m of pendingMaint) {
+          await syncMaintenanceEvent(m);
+        }
+
+        // 5. Work sessions pendentes
+        const pendingWs = await getPendingWorkSessions(user.id);
+        console.log("[SYNC] reprocessando", pendingWs.length, "turnos pendentes");
+        for (const ws of pendingWs) {
+          await syncWorkSession(ws);
+        }
+
+        await updateStatus();
 
         const stillPending = await getPendingTransactions(user.id);
         const permanentlyFailed = stillPending.filter(
@@ -80,7 +120,6 @@ export function useTransactionSync() {
 
         setStatus((s) => ({
           ...s,
-          pendingTransactions: stillPending.length,
           lastSyncSuccessAt: new Date().toISOString(),
           lastError:
             permanentlyFailed.length > 0
@@ -94,7 +133,7 @@ export function useTransactionSync() {
         isSyncing.current = false;
       }
     },
-    [isAuthenticated, user?.id]
+    [isAuthenticated, user?.id, updateStatus]
   );
 
   /** Reseta o contador de tentativas — usado pelo botão manual "Sincronizar agora". */
@@ -105,9 +144,10 @@ export function useTransactionSync() {
 
   useEffect(() => {
     if (isAuthenticated) {
+      updateStatus();
       syncNow();
     }
-  }, [isAuthenticated, syncNow]);
+  }, [isAuthenticated, syncNow, updateStatus]);
 
   useEffect(() => {
     const appStateSub = AppState.addEventListener("change", (nextState) => {

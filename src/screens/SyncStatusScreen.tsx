@@ -19,6 +19,10 @@ export default function SyncStatusScreen() {
 
       <View style={styles.card}>
         <Row label="Transações pendentes" value={String(status.pendingTransactions)} />
+        <Row label="Veículos pendentes" value={String(status.pendingVehicles)} />
+        <Row label="Manutenções pendentes" value={String(status.pendingMaintenance)} />
+        <Row label="Turnos pendentes" value={String(status.pendingWorkSessions)} />
+        <Row label="Deleções pendentes" value={String(status.pendingDeletes)} />
         <Row
           label="Última tentativa"
           value={status.lastSyncAttemptAt ? new Date(status.lastSyncAttemptAt).toLocaleString("pt-BR") : "—"}

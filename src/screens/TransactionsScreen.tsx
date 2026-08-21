@@ -53,7 +53,7 @@ export default function TransactionsScreen() {
           text: "Excluir",
           style: "destructive",
           onPress: async () => {
-            await deleteTransaction(item.id);
+            await deleteTransaction(user.id, item.id);
             setTransactions((prev) => prev.filter((t) => t.id !== item.id));
           }
         }
