@@ -2,7 +2,7 @@ import * as SQLite from "expo-sqlite";
 
 let dbInstance: SQLite.SQLiteDatabase | null = null;
 
-const LATEST_DB_VERSION = 2;
+const LATEST_DB_VERSION = 3;
 
 export async function getDb(): Promise<SQLite.SQLiteDatabase> {
   if (dbInstance) return dbInstance;
@@ -30,8 +30,6 @@ async function migrate(db: SQLite.SQLiteDatabase) {
     PRAGMA foreign_keys = ON;
   `);
 
-  // Schema para instalações novas. CREATE TABLE IF NOT EXISTS também garante
-  // que tabelas introduzidas em versões posteriores existam em bancos antigos.
   await db.execAsync(`
     CREATE TABLE IF NOT EXISTS vehicles (
       id TEXT PRIMARY KEY NOT NULL,
@@ -87,6 +85,24 @@ async function migrate(db: SQLite.SQLiteDatabase) {
       FOREIGN KEY (vehicle_id) REFERENCES vehicles(id)
     );
 
+    CREATE TABLE IF NOT EXISTS preventive_maintenance_plans (
+      id TEXT PRIMARY KEY NOT NULL,
+      user_id TEXT NOT NULL,
+      vehicle_id TEXT NOT NULL,
+      category TEXT NOT NULL,
+      interval_km INTEGER CHECK (interval_km IS NULL OR interval_km > 0),
+      interval_days INTEGER CHECK (interval_days IS NULL OR interval_days > 0),
+      warning_km INTEGER CHECK (warning_km IS NULL OR warning_km >= 0),
+      warning_days INTEGER CHECK (warning_days IS NULL OR warning_days >= 0),
+      is_active INTEGER NOT NULL DEFAULT 1 CHECK (is_active IN (0, 1)),
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      sync_state TEXT NOT NULL DEFAULT 'pending',
+      sync_error TEXT,
+      CHECK (interval_km IS NOT NULL OR interval_days IS NOT NULL),
+      FOREIGN KEY (vehicle_id) REFERENCES vehicles(id)
+    );
+
     CREATE TABLE IF NOT EXISTS pending_deletes (
       id TEXT PRIMARY KEY NOT NULL,
       user_id TEXT NOT NULL,
@@ -99,9 +115,6 @@ async function migrate(db: SQLite.SQLiteDatabase) {
     );
   `);
 
-  // Instalações anteriores podem já ter work_sessions sem as colunas de sync.
-  // Inspecionamos a tabela antes de ALTER TABLE para também recuperar bancos
-  // que tenham falhado no meio de uma migração anterior.
   if (!(await hasColumn(db, "work_sessions", "sync_state"))) {
     await db.execAsync(`ALTER TABLE work_sessions ADD COLUMN sync_state TEXT;`);
   }
@@ -110,14 +123,12 @@ async function migrate(db: SQLite.SQLiteDatabase) {
     await db.execAsync(`ALTER TABLE work_sessions ADD COLUMN sync_error TEXT;`);
   }
 
-  // Turnos antigos sem estado entram na fila para uma sincronização segura.
   await db.execAsync(`
     UPDATE work_sessions
     SET sync_state = 'pending'
     WHERE sync_state IS NULL;
   `);
 
-  // Índices são sempre idempotentes e podem ser garantidos em toda abertura.
   await db.execAsync(`
     CREATE INDEX IF NOT EXISTS idx_transactions_user ON transactions(user_id);
     CREATE INDEX IF NOT EXISTS idx_transactions_sync ON transactions(sync_state);
@@ -126,6 +137,10 @@ async function migrate(db: SQLite.SQLiteDatabase) {
     CREATE INDEX IF NOT EXISTS idx_work_sessions_user_started ON work_sessions(user_id, started_at);
     CREATE INDEX IF NOT EXISTS idx_work_sessions_user ON work_sessions(user_id);
     CREATE INDEX IF NOT EXISTS idx_vehicles_user ON vehicles(user_id);
+    CREATE INDEX IF NOT EXISTS idx_preventive_plans_user ON preventive_maintenance_plans(user_id);
+    CREATE INDEX IF NOT EXISTS idx_preventive_plans_vehicle ON preventive_maintenance_plans(vehicle_id);
+    CREATE INDEX IF NOT EXISTS idx_preventive_plans_user_vehicle ON preventive_maintenance_plans(user_id, vehicle_id);
+    CREATE INDEX IF NOT EXISTS idx_preventive_plans_sync ON preventive_maintenance_plans(sync_state);
     CREATE INDEX IF NOT EXISTS idx_pending_deletes_user ON pending_deletes(user_id);
     CREATE INDEX IF NOT EXISTS idx_pending_deletes_sync ON pending_deletes(sync_state);
     CREATE UNIQUE INDEX IF NOT EXISTS idx_pending_deletes_record
@@ -136,8 +151,6 @@ async function migrate(db: SQLite.SQLiteDatabase) {
   const currentVersion = versionResult?.user_version ?? 0;
 
   if (currentVersion < LATEST_DB_VERSION) {
-    // expo-sqlite não precisa de API especial para user_version; PRAGMA funciona
-    // de forma consistente e mantém a migração independente da versão do SDK.
     await db.execAsync(`PRAGMA user_version = ${LATEST_DB_VERSION};`);
   }
 }
@@ -146,6 +159,7 @@ async function migrate(db: SQLite.SQLiteDatabase) {
 export async function DEBUG_wipeLocalDb() {
   const db = await getDb();
   await db.execAsync(`
+    DELETE FROM preventive_maintenance_plans;
     DELETE FROM work_sessions;
     DELETE FROM maintenance_events;
     DELETE FROM transactions;
