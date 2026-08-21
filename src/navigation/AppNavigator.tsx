@@ -11,6 +11,8 @@ import VehiclesScreen from "@/screens/VehiclesScreen";
 import MaintenanceScreen from "@/screens/MaintenanceScreen";
 import SyncStatusScreen from "@/screens/SyncStatusScreen";
 import WorkSessionScreen from "@/screens/WorkSessionScreen";
+import WorkSessionHistoryScreen from "@/screens/WorkSessionHistoryScreen";
+import WorkSessionDetailScreen from "@/screens/WorkSessionDetailScreen";
 
 const Stack = createNativeStackNavigator();
 
@@ -39,24 +41,14 @@ export default function AppNavigator() {
         ) : (
           <>
             <Stack.Screen name="Dashboard" component={DashboardScreen} options={{ headerShown: false }} />
-            <Stack.Screen
-              name="WorkSession"
-              component={WorkSessionScreen}
-              options={{ title: "Turno de trabalho" }}
-            />
-            <Stack.Screen
-              name="AddTransaction"
-              component={AddTransactionScreen}
-              options={{ title: "Nova transação" }}
-            />
+            <Stack.Screen name="WorkSession" component={WorkSessionScreen} options={{ title: "Turno de trabalho" }} />
+            <Stack.Screen name="WorkSessionHistory" component={WorkSessionHistoryScreen} options={{ title: "Histórico de turnos" }} />
+            <Stack.Screen name="WorkSessionDetail" component={WorkSessionDetailScreen} options={{ title: "Detalhes do turno" }} />
+            <Stack.Screen name="AddTransaction" component={AddTransactionScreen} options={{ title: "Nova transação" }} />
             <Stack.Screen name="Transactions" component={TransactionsScreen} options={{ title: "Transações" }} />
             <Stack.Screen name="Vehicles" component={VehiclesScreen} options={{ title: "Veículos" }} />
             <Stack.Screen name="Maintenance" component={MaintenanceScreen} options={{ title: "Manutenção" }} />
-            <Stack.Screen
-              name="SyncStatus"
-              component={SyncStatusScreen}
-              options={{ title: "Status de Sincronização" }}
-            />
+            <Stack.Screen name="SyncStatus" component={SyncStatusScreen} options={{ title: "Status de Sincronização" }} />
           </>
         )}
       </Stack.Navigator>
