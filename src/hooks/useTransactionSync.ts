@@ -1,9 +1,17 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { AppState } from "react-native";
 import NetInfo from "@react-native-community/netinfo";
-import { createTransaction, getPendingTransactions, processPendingDeletes, getPendingDeletes } from "@/services/TransactionService";
+import {
+  createTransaction,
+  getPendingTransactions,
+  processPendingDeletes,
+  getPendingDeletes
+} from "@/services/TransactionService";
 import { syncVehicle, getPendingVehicles } from "@/services/VehicleService";
-import { syncMaintenanceEvent, getPendingMaintenanceEvents } from "@/services/MaintenanceService";
+import {
+  syncMaintenanceEvent,
+  getPendingMaintenanceEvents
+} from "@/services/MaintenanceService";
 import { syncWorkSession, getPendingWorkSessions } from "@/services/WorkSessionService";
 import { useAuth } from "@/context/AuthContext";
 import type { SyncStatusSnapshot } from "@/types";
@@ -11,16 +19,40 @@ import type { SyncStatusSnapshot } from "@/types";
 const MAX_ATTEMPTS = 5;
 const BASE_DELAY_MS = 5000;
 
-// Contador de tentativas em memória por id de transação
-const attemptCounts = new Map<string, number>();
+type RetryMeta = {
+  attempts: number;
+  lastAttemptAt: number;
+};
+
+// Controle em memória apenas para cadenciar retries durante a sessão atual.
+// O estado persistente continua sendo sync_state/sync_error no SQLite.
+const retryMeta = new Map<string, RetryMeta>();
+
+function canRetryTransaction(id: string, force: boolean): boolean {
+  if (force) return true;
+
+  const meta = retryMeta.get(id);
+  if (!meta) return true;
+  if (meta.attempts >= MAX_ATTEMPTS) return false;
+
+  const delay = BASE_DELAY_MS * Math.pow(2, Math.max(0, meta.attempts - 1));
+  return Date.now() - meta.lastAttemptAt >= delay;
+}
+
+function registerTransactionAttempt(id: string) {
+  const current = retryMeta.get(id);
+  retryMeta.set(id, {
+    attempts: (current?.attempts ?? 0) + 1,
+    lastAttemptAt: Date.now()
+  });
+}
 
 /**
- * Reprocessa entidades pendentes (transactions, vehicles, maintenance, work_sessions)
- * e deleções pendentes quando:
+ * Reprocessa entidades pendentes e deleções quando:
  * - o app volta pro foreground;
- * - a conexão volta (NetInfo);
+ * - a conexão volta;
  * - o usuário loga;
- * - chamado manualmente via `syncNow()`.
+ * - chamado manualmente via syncNow().
  */
 export function useTransactionSync() {
   const { user, isAuthenticated } = useAuth();
@@ -45,7 +77,7 @@ export function useTransactionSync() {
       getPendingWorkSessions(user.id),
       getPendingDeletes(user.id)
     ]);
-    setStatus(s => ({
+    setStatus((s) => ({
       ...s,
       pendingTransactions: tx.length,
       pendingVehicles: veh.length,
@@ -65,66 +97,79 @@ export function useTransactionSync() {
         return;
       }
 
+      const force = opts?.force === true;
       isSyncing.current = true;
       setStatus((s) => ({ ...s, lastSyncAttemptAt: new Date().toISOString() }));
 
       try {
-        // 1. Processar deleções pendentes primeiro
+        // Deleções primeiro para não reenviar registros que o usuário já removeu.
         await processPendingDeletes(user.id);
 
-        // 2. Transações pendentes
         const pendingTx = await getPendingTransactions(user.id);
         console.log("[SYNC] reprocessando", pendingTx.length, "transações pendentes");
         for (const tx of pendingTx) {
-          const attempts = attemptCounts.get(tx.id) ?? 0;
-          if (!opts?.force && attempts >= MAX_ATTEMPTS) {
-            console.log("[SYNC] limite de tentativas atingido, pulando", tx.id);
-            continue;
-          }
-          if (!opts?.force && attempts > 0) {
-            const delay = BASE_DELAY_MS * Math.pow(2, attempts - 1);
-            const elapsed = Date.now() - new Date(tx.created_at).getTime();
-            if (elapsed < delay) continue;
-          }
-          attemptCounts.set(tx.id, attempts + 1);
+          if (!canRetryTransaction(tx.id, force)) continue;
+          registerTransactionAttempt(tx.id);
           await createTransaction(tx);
         }
 
-        // 3. Veículos pendentes
         const pendingVeh = await getPendingVehicles(user.id);
         console.log("[SYNC] reprocessando", pendingVeh.length, "veículos pendentes");
-        for (const v of pendingVeh) {
-          await syncVehicle(v);
+        for (const vehicle of pendingVeh) {
+          await syncVehicle(vehicle);
         }
 
-        // 4. Manutenções pendentes
         const pendingMaint = await getPendingMaintenanceEvents(user.id);
         console.log("[SYNC] reprocessando", pendingMaint.length, "manutenções pendentes");
-        for (const m of pendingMaint) {
-          await syncMaintenanceEvent(m);
+        for (const maintenance of pendingMaint) {
+          await syncMaintenanceEvent(maintenance);
         }
 
-        // 5. Work sessions pendentes
         const pendingWs = await getPendingWorkSessions(user.id);
         console.log("[SYNC] reprocessando", pendingWs.length, "turnos pendentes");
-        for (const ws of pendingWs) {
-          await syncWorkSession(ws);
+        for (const workSession of pendingWs) {
+          await syncWorkSession(workSession);
         }
 
-        await updateStatus();
+        const [stillTx, stillVeh, stillMaint, stillWs, stillDeletes] = await Promise.all([
+          getPendingTransactions(user.id),
+          getPendingVehicles(user.id),
+          getPendingMaintenanceEvents(user.id),
+          getPendingWorkSessions(user.id),
+          getPendingDeletes(user.id)
+        ]);
 
-        const stillPending = await getPendingTransactions(user.id);
-        const permanentlyFailed = stillPending.filter(
-          (t) => (attemptCounts.get(t.id) ?? 0) >= MAX_ATTEMPTS
+        // Limpa metadados de retry das transações que já sincronizaram.
+        const stillPendingIds = new Set(stillTx.map((tx) => tx.id));
+        for (const id of retryMeta.keys()) {
+          if (!stillPendingIds.has(id)) retryMeta.delete(id);
+        }
+
+        const totalPending =
+          stillTx.length +
+          stillVeh.length +
+          stillMaint.length +
+          stillWs.length +
+          stillDeletes.length;
+
+        const exhaustedTransactions = stillTx.filter(
+          (tx) => (retryMeta.get(tx.id)?.attempts ?? 0) >= MAX_ATTEMPTS
         );
 
         setStatus((s) => ({
           ...s,
-          lastSyncSuccessAt: new Date().toISOString(),
+          pendingTransactions: stillTx.length,
+          pendingVehicles: stillVeh.length,
+          pendingMaintenance: stillMaint.length,
+          pendingWorkSessions: stillWs.length,
+          pendingDeletes: stillDeletes.length,
+          lastSyncSuccessAt: totalPending === 0 ? new Date().toISOString() : s.lastSyncSuccessAt,
           lastError:
-            permanentlyFailed.length > 0
-              ? `${permanentlyFailed.length} transação(ões) falharam após ${MAX_ATTEMPTS} tentativas. Toque em "Sincronizar agora" para tentar de novo.`
-              : null
+            exhaustedTransactions.length > 0
+              ? `${exhaustedTransactions.length} transação(ões) atingiram o limite automático de tentativas. Toque em "Sincronizar agora" para tentar novamente.`
+              : totalPending > 0
+                ? `${totalPending} item(ns) ainda aguardam sincronização.`
+                : null
         }));
       } catch (err: any) {
         console.log("[SYNC] erro inesperado no syncNow", err);
@@ -133,12 +178,11 @@ export function useTransactionSync() {
         isSyncing.current = false;
       }
     },
-    [isAuthenticated, user?.id, updateStatus]
+    [isAuthenticated, user?.id]
   );
 
-  /** Reseta o contador de tentativas — usado pelo botão manual "Sincronizar agora". */
   const forceSyncNow = useCallback(async () => {
-    attemptCounts.clear();
+    retryMeta.clear();
     await syncNow({ force: true });
   }, [syncNow]);
 
