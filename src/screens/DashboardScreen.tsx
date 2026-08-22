@@ -130,36 +130,61 @@ export default function DashboardScreen({ navigation }: any) {
         </View>
 
         {activeSession && sessionMetrics ? (
-          <Pressable style={styles.activeSessionCard} onPress={() => navigation.navigate("WorkSession")}>
-            <View style={styles.activeSessionHeader}>
-              <View>
-                <Text style={styles.activeSessionEyebrow}>TURNO ATIVO</Text>
-                <Text style={styles.activeSessionVehicle}>
-                  {sessionVehicle
-                    ? `${sessionVehicle.name}${sessionVehicle.plate ? ` • ${sessionVehicle.plate}` : ""}`
-                    : "Veículo do turno"}
-                </Text>
+          <>
+            <Pressable style={styles.activeSessionCard} onPress={() => navigation.navigate("WorkSession")}>
+              <View style={styles.activeSessionHeader}>
+                <View>
+                  <Text style={styles.activeSessionEyebrow}>TURNO ATIVO</Text>
+                  <Text style={styles.activeSessionVehicle}>
+                    {sessionVehicle
+                      ? `${sessionVehicle.name}${sessionVehicle.plate ? ` • ${sessionVehicle.plate}` : ""}`
+                      : "Veículo do turno"}
+                  </Text>
+                </View>
+                <Text style={styles.activeSessionDuration}>{formatDuration(sessionMetrics.durationHours)}</Text>
               </View>
-              <Text style={styles.activeSessionDuration}>{formatDuration(sessionMetrics.durationHours)}</Text>
+              <View style={styles.activeSessionMetrics}>
+                <View style={styles.activeMetric}>
+                  <Text style={styles.activeMetricLabel}>Receita</Text>
+                  <Text style={[styles.activeMetricValue, styles.income]}>
+                    {formatCentsToBRL(sessionMetrics.grossIncome)}
+                  </Text>
+                </View>
+                <View style={styles.activeMetric}>
+                  <Text style={styles.activeMetricLabel}>Lucro</Text>
+                  <Text style={styles.activeMetricValue}>{formatCentsToBRL(sessionMetrics.netProfit)}</Text>
+                </View>
+                <View style={styles.activeMetric}>
+                  <Text style={styles.activeMetricLabel}>Lucro / hora</Text>
+                  <Text style={styles.activeMetricValue}>{moneyOrDash(sessionMetrics.perHourCents)}</Text>
+                </View>
+              </View>
+            </Pressable>
+
+            <View style={styles.quickActions}>
+              <Pressable
+                style={[styles.quickAction, styles.quickIncome]}
+                onPress={() => navigation.navigate("AddTransaction", { type: "income" })}
+              >
+                <Text style={styles.quickActionSymbol}>+</Text>
+                <Text style={styles.quickActionText}>Receita</Text>
+              </Pressable>
+              <Pressable
+                style={[styles.quickAction, styles.quickExpense]}
+                onPress={() => navigation.navigate("AddTransaction", { type: "expense" })}
+              >
+                <Text style={styles.quickActionSymbol}>−</Text>
+                <Text style={styles.quickActionText}>Despesa</Text>
+              </Pressable>
+              <Pressable
+                style={[styles.quickAction, styles.quickEnd]}
+                onPress={() => navigation.navigate("WorkSession")}
+              >
+                <Text style={styles.quickActionSymbol}>■</Text>
+                <Text style={styles.quickActionText}>Encerrar</Text>
+              </Pressable>
             </View>
-            <View style={styles.activeSessionMetrics}>
-              <View style={styles.activeMetric}>
-                <Text style={styles.activeMetricLabel}>Receita</Text>
-                <Text style={[styles.activeMetricValue, styles.income]}>
-                  {formatCentsToBRL(sessionMetrics.grossIncome)}
-                </Text>
-              </View>
-              <View style={styles.activeMetric}>
-                <Text style={styles.activeMetricLabel}>Lucro</Text>
-                <Text style={styles.activeMetricValue}>{formatCentsToBRL(sessionMetrics.netProfit)}</Text>
-              </View>
-              <View style={styles.activeMetric}>
-                <Text style={styles.activeMetricLabel}>Lucro / hora</Text>
-                <Text style={styles.activeMetricValue}>{moneyOrDash(sessionMetrics.perHourCents)}</Text>
-              </View>
-            </View>
-            <Text style={styles.activeSessionAction}>Toque para encerrar o turno →</Text>
-          </Pressable>
+          </>
         ) : null}
 
         <View style={styles.periodTabs}>
@@ -214,15 +239,12 @@ export default function DashboardScreen({ navigation }: any) {
           </Text>
         </Pressable>
 
-        <Pressable
-          style={[styles.workButton, activeSession && styles.workButtonActive]}
-          onPress={() => navigation.navigate("WorkSession")}
-        >
-          <Text style={styles.workButtonTitle}>{activeSession ? "Encerrar turno" : "Iniciar turno"}</Text>
-          <Text style={styles.workButtonText}>
-            {activeSession ? "Confira o resumo e informe o odômetro final →" : "Registre horário e odômetro inicial →"}
-          </Text>
-        </Pressable>
+        {!activeSession ? (
+          <Pressable style={styles.workButton} onPress={() => navigation.navigate("WorkSession")}>
+            <Text style={styles.workButtonTitle}>Iniciar turno</Text>
+            <Text style={styles.workButtonText}>Registre horário e odômetro inicial →</Text>
+          </Pressable>
+        ) : null}
 
         <Pressable style={styles.syncStatus} onPress={() => navigation.navigate("SyncStatus")}>
           <Text style={styles.syncStatusText}>
@@ -230,14 +252,16 @@ export default function DashboardScreen({ navigation }: any) {
           </Text>
         </Pressable>
 
-        <View style={styles.actions}>
-          <Pressable style={[styles.actionButton, styles.incomeButton]} onPress={() => navigation.navigate("AddTransaction", { type: "income" })}>
-            <Text style={styles.actionButtonText}>+ Receita</Text>
-          </Pressable>
-          <Pressable style={[styles.actionButton, styles.expenseButton]} onPress={() => navigation.navigate("AddTransaction", { type: "expense" })}>
-            <Text style={styles.actionButtonText}>- Despesa</Text>
-          </Pressable>
-        </View>
+        {!activeSession ? (
+          <View style={styles.actions}>
+            <Pressable style={[styles.actionButton, styles.incomeButton]} onPress={() => navigation.navigate("AddTransaction", { type: "income" })}>
+              <Text style={styles.actionButtonText}>+ Receita</Text>
+            </Pressable>
+            <Pressable style={[styles.actionButton, styles.expenseButton]} onPress={() => navigation.navigate("AddTransaction", { type: "expense" })}>
+              <Text style={styles.actionButtonText}>- Despesa</Text>
+            </Pressable>
+          </View>
+        ) : null}
 
         <Pressable style={styles.linkRow} onPress={() => navigation.navigate("Transactions")}><Text style={styles.linkText}>Transações →</Text></Pressable>
         <Pressable style={styles.linkRow} onPress={() => navigation.navigate("Vehicles")}><Text style={styles.linkText}>Veículos →</Text></Pressable>
@@ -253,7 +277,7 @@ const styles = StyleSheet.create({
   title: { color: "#fff", fontSize: 22, fontWeight: "800" },
   subtitle: { color: "#64748B", marginTop: 2, fontSize: 12 },
   logout: { color: "#F87171" },
-  activeSessionCard: { backgroundColor: "#172554", borderWidth: 1, borderColor: "#22C55E", borderRadius: 16, padding: 16, marginBottom: 14 },
+  activeSessionCard: { backgroundColor: "#172554", borderWidth: 1, borderColor: "#22C55E", borderRadius: 16, padding: 16, marginBottom: 10 },
   activeSessionHeader: { flexDirection: "row", justifyContent: "space-between", alignItems: "flex-start" },
   activeSessionEyebrow: { color: "#22C55E", fontSize: 12, fontWeight: "900", letterSpacing: 1 },
   activeSessionVehicle: { color: "#CBD5E1", fontSize: 13, marginTop: 4 },
@@ -262,7 +286,13 @@ const styles = StyleSheet.create({
   activeMetric: { flex: 1, backgroundColor: "#0F172A", borderRadius: 10, padding: 10 },
   activeMetricLabel: { color: "#94A3B8", fontSize: 10 },
   activeMetricValue: { color: "#fff", fontSize: 13, fontWeight: "800", marginTop: 4 },
-  activeSessionAction: { color: "#38BDF8", fontSize: 12, fontWeight: "700", marginTop: 12 },
+  quickActions: { flexDirection: "row", gap: 8, marginBottom: 14 },
+  quickAction: { flex: 1, minHeight: 68, borderRadius: 12, alignItems: "center", justifyContent: "center", paddingHorizontal: 6 },
+  quickIncome: { backgroundColor: "#22C55E" },
+  quickExpense: { backgroundColor: "#EF4444" },
+  quickEnd: { backgroundColor: "#F59E0B" },
+  quickActionSymbol: { color: "#0F172A", fontSize: 19, fontWeight: "900", lineHeight: 21 },
+  quickActionText: { color: "#0F172A", fontSize: 12, fontWeight: "900", marginTop: 2 },
   periodTabs: { flexDirection: "row", backgroundColor: "#1E293B", borderRadius: 12, padding: 4, marginBottom: 12 },
   periodTab: { flex: 1, paddingVertical: 9, alignItems: "center", borderRadius: 9 },
   periodTabActive: { backgroundColor: "#38BDF8" },
@@ -284,7 +314,6 @@ const styles = StyleSheet.create({
   maintenanceTitle: { color: "#fff", fontWeight: "800" },
   maintenanceText: { color: "#CBD5E1", marginTop: 4, fontSize: 13 },
   workButton: { backgroundColor: "#0EA5E9", borderRadius: 14, padding: 16, marginBottom: 12 },
-  workButtonActive: { backgroundColor: "#F59E0B" },
   workButtonTitle: { color: "#082F49", fontSize: 16, fontWeight: "800" },
   workButtonText: { color: "#082F49", marginTop: 2, fontSize: 13 },
   syncStatus: { backgroundColor: "#1E293B", borderRadius: 10, padding: 12, marginBottom: 16 },
