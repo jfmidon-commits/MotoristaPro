@@ -1,0 +1,80 @@
+name: Android APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - stabilize/offline-sync
+    paths:
+      - "src/**"
+      - "App.tsx"
+      - "app.json"
+      - "package.json"
+      - ".env.example"
+      - ".github/workflows/android-apk.yml"
+  pull_request:
+    branches:
+      - main
+    paths:
+      - "src/**"
+      - "App.tsx"
+      - "app.json"
+      - "package.json"
+      - ".env.example"
+      - ".github/workflows/android-apk.yml"
+
+jobs:
+  build-apk:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Configure MotoristaPro Supabase
+        run: cp .env.example .env.local
+
+      - name: Generate Android project
+        run: npx expo prebuild --platform android --non-interactive --clean
+
+      - name: Ensure splash background resource
+        run: |
+          mkdir -p android/app/src/main/res/values
+          cat > android/app/src/main/res/values/motoristapro_splash.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <resources>
+            <color name="splashscreen_background">#0F172A</color>
+          </resources>
+          EOF
+
+      - name: Build standalone APK
+        working-directory: android
+        env:
+          NODE_ENV: production
+        run: ./gradlew assembleRelease --no-daemon
+
+      - name: Rename APK
+        run: cp android/app/build/outputs/apk/release/app-release.apk MotoristaPro-test.apk
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: MotoristaPro-Android-test
+          path: MotoristaPro-test.apk
+          if-no-files-found: error
+          retention-days: 14

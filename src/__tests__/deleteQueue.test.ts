@@ -1,73 +1,150 @@
-import { calculateDerivedMetrics } from "@/services/DerivedMetrics";
+jest.mock("@/lib/database", () => ({ getDb: jest.fn() }));
+jest.mock("@/lib/supabase", () => ({
+  supabase: {
+    from: jest.fn(),
+    auth: { getSession: jest.fn() }
+  }
+}));
+jest.mock("uuid", () => ({ v4: () => "delete-test-id" }));
 
-describe("Fluxo de deleção offline-first", () => {
-  it("delete remoto OK: remove definitivamente local + fila", () => {
-    // Fluxo simulado:
-    // 1. Tentativa de delete remoto → sucesso
-    // 2. Remove do SQLite local
-    // 3. Limpa pending_deletes
-    const remoteDeleted = true;
-    const localDeleted = true;
-    const queueCleaned = true;
-    expect(remoteDeleted && localDeleted && queueCleaned).toBe(true);
+import { getDb } from "@/lib/database";
+import { supabase } from "@/lib/supabase";
+import {
+  deleteTransaction,
+  processPendingDeletes,
+  queueDelete
+} from "@/services/TransactionService";
+import type { PendingDelete } from "@/types";
+
+const mockedGetDb = getDb as jest.MockedFunction<typeof getDb>;
+const mockedFrom = supabase.from as jest.MockedFunction<typeof supabase.from>;
+
+function createDbMock() {
+  return {
+    runAsync: jest.fn().mockResolvedValue(undefined),
+    getAllAsync: jest.fn(),
+    getFirstAsync: jest.fn()
+  };
+}
+
+function mockRemoteDelete(error: { message: string } | null) {
+  const eq = jest.fn().mockResolvedValue({ error });
+  const deleteFn = jest.fn(() => ({ eq }));
+  mockedFrom.mockReturnValue({ delete: deleteFn } as never);
+  return { deleteFn, eq };
+}
+
+const pendingDelete: PendingDelete = {
+  id: "pd-1",
+  user_id: "user-1",
+  table_name: "transactions",
+  record_id: "tx-1",
+  created_at: "2026-08-21T10:00:00.000Z",
+  sync_state: "pending",
+  sync_error: null,
+  attempts: 0
+};
+
+describe("fila de deleção offline", () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
   });
 
-  it("delete remoto falha: cria fila/tombstone, preserva local", () => {
-    // Fluxo simulado:
-    // 1. Tentativa de delete remoto → falha (rede/erro)
-    // 2. Cria entrada em pending_deletes
-    // 3. NÃO remove do SQLite local
-    // 4. getAllTransactions filtra via NOT EXISTS pending_deletes
-    const remoteDeleted = false;
-    const queueCreated = true;
-    const localPreserved = true;
-    const isHidden = true; // filtro de tombstone ativo
-    expect(!remoteDeleted && queueCreated && localPreserved && isHidden).toBe(true);
+  it("queueDelete é idempotente via ON CONFLICT", async () => {
+    const db = createDbMock();
+    mockedGetDb.mockResolvedValue(db as never);
+
+    await queueDelete({ userId: "user-1", tableName: "transactions", recordId: "tx-1" });
+
+    const sql = db.runAsync.mock.calls[0][0] as string;
+    expect(sql).toContain("ON CONFLICT(user_id, table_name, record_id)");
+    expect(sql).toContain("attempts = 0");
   });
 
-  it("erro de delete continua elegível para retry (attempts < max)", () => {
-    const attempts = 3;
-    const maxAttempts = 5;
-    const isEligible = attempts < maxAttempts;
-    expect(isEligible).toBe(true);
+  it("falha remota ao deletar cria tombstone e preserva registro local", async () => {
+    const db = createDbMock();
+    mockedGetDb.mockResolvedValue(db as never);
+    mockRemoteDelete({ message: "offline" });
+
+    await deleteTransaction("user-1", "tx-1");
+
+    const sqlCalls = db.runAsync.mock.calls.map((call) => String(call[0]));
+    expect(sqlCalls.some((sql) => sql.includes("INSERT INTO pending_deletes"))).toBe(true);
+    expect(sqlCalls.some((sql) => sql.includes("DELETE FROM transactions"))).toBe(false);
   });
 
-  it("retry bem sucedido limpa fila e registro", () => {
-    // Fluxo simulado:
-    // 1. processPendingDeletes tenta novamente
-    // 2. Remoto responde sucesso
-    // 3. Remove do SQLite local
-    // 4. Remove da fila pending_deletes
-    const retrySuccess = true;
-    const localRemoved = true;
-    const queueRemoved = true;
-    expect(retrySuccess && localRemoved && queueRemoved).toBe(true);
+  it("sucesso remoto remove o registro local", async () => {
+    const db = createDbMock();
+    mockedGetDb.mockResolvedValue(db as never);
+    mockRemoteDelete(null);
+
+    await deleteTransaction("user-1", "tx-1");
+
+    const sqlCalls = db.runAsync.mock.calls.map((call) => String(call[0]));
+    expect(sqlCalls.some((sql) => sql.includes("DELETE FROM transactions"))).toBe(true);
+    expect(sqlCalls.some((sql) => sql.includes("DELETE FROM pending_deletes"))).toBe(true);
   });
 
-  it("limite de tentativas atingido: não retry automático, mas force reseta", () => {
-    const attempts = 5;
-    const maxAttempts = 5;
-    const autoRetry = attempts < maxAttempts;
-    const forceRetry = true; // forceSyncNow reseta contador
-    expect(!autoRetry && forceRetry).toBe(true);
-  });
-});
+  it("falha no retry incrementa attempts e mantém tombstone", async () => {
+    const db = createDbMock();
+    db.getAllAsync.mockResolvedValue([pendingDelete]);
+    mockedGetDb.mockResolvedValue(db as never);
+    mockRemoteDelete({ message: "continua offline" });
 
-describe("WorkSession validações", () => {
-  it("não permite dois turnos abertos simultâneos", () => {
-    const hasActiveSession = true;
-    expect(hasActiveSession).toBe(true);
-    // Se hasActiveSession === true, startWorkSession deve rejeitar
-  });
+    await processPendingDeletes("user-1");
 
-  it("encerrar turno inexistente deve falhar", () => {
-    const sessionExists = false;
-    expect(sessionExists).toBe(false);
-    // Se sessionExists === false, endWorkSession deve rejeitar
+    const updateCall = db.runAsync.mock.calls.find((call) =>
+      String(call[0]).includes("attempts = attempts + 1")
+    );
+    expect(updateCall).toBeDefined();
+    expect(
+      db.runAsync.mock.calls.some((call) => String(call[0]).includes("DELETE FROM pending_deletes"))
+    ).toBe(false);
   });
 
-  it("sync_state de work session inicia como pending", () => {
-    const syncState = "pending";
-    expect(syncState).toBe("pending");
+  it("retry bem sucedido remove registro local e tombstone", async () => {
+    const db = createDbMock();
+    db.getAllAsync.mockResolvedValue([pendingDelete]);
+    mockedGetDb.mockResolvedValue(db as never);
+    mockRemoteDelete(null);
+
+    await processPendingDeletes("user-1");
+
+    const sqlCalls = db.runAsync.mock.calls.map((call) => String(call[0]));
+    expect(sqlCalls.some((sql) => sql.includes("DELETE FROM transactions"))).toBe(true);
+    expect(sqlCalls.some((sql) => sql.includes("DELETE FROM pending_deletes"))).toBe(true);
+  });
+
+  it("processa tombstone de plano preventivo pela mesma fila genérica", async () => {
+    const db = createDbMock();
+    db.getAllAsync.mockResolvedValue([
+      {
+        ...pendingDelete,
+        id: "pd-plan",
+        table_name: "preventive_maintenance_plans",
+        record_id: "plan-1"
+      }
+    ]);
+    mockedGetDb.mockResolvedValue(db as never);
+    const remote = mockRemoteDelete(null);
+
+    await processPendingDeletes("user-1");
+
+    expect(mockedFrom).toHaveBeenCalledWith("preventive_maintenance_plans");
+    expect(remote.eq).toHaveBeenCalledWith("id", "plan-1");
+    expect(
+      db.runAsync.mock.calls.some((call) => String(call[0]).includes("DELETE FROM preventive_maintenance_plans"))
+    ).toBe(true);
+  });
+
+  it("modo force consulta também tombstones que atingiram o limite automático", async () => {
+    const db = createDbMock();
+    db.getAllAsync.mockResolvedValue([]);
+    mockedGetDb.mockResolvedValue(db as never);
+
+    await processPendingDeletes("user-1", { force: true });
+
+    const sql = db.getAllAsync.mock.calls[0][0] as string;
+    expect(sql).not.toContain("attempts <");
   });
 });

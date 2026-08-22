@@ -1,0 +1,128 @@
+jest.mock("@/lib/database", () => ({ getDb: jest.fn() }));
+jest.mock("@/lib/supabase", () => ({
+  supabase: {
+    auth: { getSession: jest.fn() },
+    from: jest.fn()
+  }
+}));
+jest.mock("uuid", () => ({ v4: () => "vehicle-test-id" }));
+
+import { getDb } from "@/lib/database";
+import { supabase } from "@/lib/supabase";
+import {
+  getVehicleById,
+  setDefaultVehicle,
+  updateVehicle
+} from "@/services/VehicleService";
+
+const mockedGetDb = getDb as jest.MockedFunction<typeof getDb>;
+const mockedGetSession = supabase.auth.getSession as jest.MockedFunction<typeof supabase.auth.getSession>;
+
+function createDbMock() {
+  return {
+    getFirstAsync: jest.fn(),
+    getAllAsync: jest.fn(),
+    runAsync: jest.fn().mockResolvedValue(undefined)
+  };
+}
+
+const vehicleRow = {
+  id: "vehicle-1",
+  user_id: "user-1",
+  name: "Onix",
+  plate: "ABC1D23",
+  is_default: 0,
+  created_at: "2026-08-21T10:00:00.000Z",
+  sync_state: "synced",
+  sync_error: null
+};
+
+describe("VehicleService", () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockedGetSession.mockResolvedValue({ data: { session: null }, error: null } as never);
+  });
+
+  it("busca veículo sempre filtrando pelo usuário e id", async () => {
+    const db = createDbMock();
+    db.getFirstAsync.mockResolvedValue(vehicleRow);
+    mockedGetDb.mockResolvedValue(db as never);
+
+    const result = await getVehicleById("user-1", "vehicle-1");
+
+    expect(result?.is_default).toBe(false);
+    expect(db.getFirstAsync).toHaveBeenCalledWith(
+      expect.stringContaining("WHERE user_id = ? AND id = ?"),
+      ["user-1", "vehicle-1"]
+    );
+  });
+
+  it("edita nome e placa localmente como pending antes do sync", async () => {
+    const db = createDbMock();
+    db.getFirstAsync.mockResolvedValue(vehicleRow);
+    mockedGetDb.mockResolvedValue(db as never);
+
+    const result = await updateVehicle({
+      userId: "user-1",
+      vehicleId: "vehicle-1",
+      name: " Onix Plus ",
+      plate: " XYZ9A99 "
+    });
+
+    expect(result).toMatchObject({
+      name: "Onix Plus",
+      plate: "XYZ9A99",
+      sync_state: "pending",
+      sync_error: null
+    });
+    expect(db.runAsync).toHaveBeenCalledWith(
+      expect.stringContaining("WHERE id = ? AND user_id = ?"),
+      ["Onix Plus", "XYZ9A99", "vehicle-1", "user-1"]
+    );
+  });
+
+  it("rejeita edição de veículo que não pertence ao usuário", async () => {
+    const db = createDbMock();
+    db.getFirstAsync.mockResolvedValue(null);
+    mockedGetDb.mockResolvedValue(db as never);
+
+    await expect(
+      updateVehicle({ userId: "user-2", vehicleId: "vehicle-1", name: "Onix" })
+    ).rejects.toThrow("Veículo não encontrado");
+  });
+
+  it("troca o padrão dentro de transação local", async () => {
+    const db = createDbMock();
+    db.getFirstAsync.mockResolvedValue(vehicleRow);
+    db.getAllAsync.mockResolvedValue([
+      { ...vehicleRow, is_default: 1, sync_state: "pending" }
+    ]);
+    mockedGetDb.mockResolvedValue(db as never);
+
+    await setDefaultVehicle("user-1", "vehicle-1");
+
+    expect(db.runAsync).toHaveBeenNthCalledWith(1, "BEGIN TRANSACTION");
+    expect(db.runAsync).toHaveBeenCalledWith(
+      expect.stringContaining("SET is_default = 0"),
+      ["user-1"]
+    );
+    expect(db.runAsync).toHaveBeenCalledWith(
+      expect.stringContaining("SET is_default = 1"),
+      ["vehicle-1", "user-1"]
+    );
+    expect(db.runAsync).toHaveBeenCalledWith("COMMIT");
+  });
+
+  it("faz rollback se a troca de padrão falhar", async () => {
+    const db = createDbMock();
+    db.getFirstAsync.mockResolvedValue(vehicleRow);
+    db.runAsync
+      .mockResolvedValueOnce(undefined)
+      .mockRejectedValueOnce(new Error("falha local"))
+      .mockResolvedValueOnce(undefined);
+    mockedGetDb.mockResolvedValue(db as never);
+
+    await expect(setDefaultVehicle("user-1", "vehicle-1")).rejects.toThrow("falha local");
+    expect(db.runAsync).toHaveBeenCalledWith("ROLLBACK");
+  });
+});
