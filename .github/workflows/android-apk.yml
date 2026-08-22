@@ -13,6 +13,17 @@ on:
       - "package-lock.json"
       - ".env.example"
       - ".github/workflows/android-apk.yml"
+  pull_request:
+    branches:
+      - main
+    paths:
+      - "src/**"
+      - "App.tsx"
+      - "app.json"
+      - "package.json"
+      - "package-lock.json"
+      - ".env.example"
+      - ".github/workflows/android-apk.yml"
 
 jobs:
   build-apk:
