@@ -3,10 +3,10 @@ import { Alert, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useFocusEffect } from "@react-navigation/native";
 import { useAuth } from "@/context/AuthContext";
-import { addTransaction } from "@/services/TransactionService";
+import { addTransaction, getTransactionById, updateTransaction } from "@/services/TransactionService";
 import { getActiveWorkSession } from "@/services/WorkSessionService";
 import { getVehicles } from "@/services/VehicleService";
-import { parseBRLInputToCents } from "@/utils/formatters";
+import { centsToBRLInput, formatBRLDigitsInput, parseBRLInputToCents } from "@/utils/formatters";
 import type { Vehicle } from "@/types";
 
 const INCOME_CATEGORIES = ["Corrida", "Gorjeta", "Bônus", "Promoções", "Outros"];
@@ -25,6 +25,8 @@ const EXPENSE_CATEGORIES = [
 
 export default function AddTransactionScreen({ route, navigation }: any) {
   const type: "income" | "expense" = route.params?.type ?? "income";
+  const transactionId: string | undefined = route.params?.transactionId;
+  const isEditing = Boolean(transactionId);
   const { user } = useAuth();
   const [amount, setAmount] = useState("");
   const [category, setCategory] = useState((type === "income" ? INCOME_CATEGORIES : EXPENSE_CATEGORIES)[0]);
@@ -33,30 +35,50 @@ export default function AddTransactionScreen({ route, navigation }: any) {
   const [vehicles, setVehicles] = useState<Vehicle[]>([]);
   const [selectedVehicleId, setSelectedVehicleId] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
+  const [loadedEdit, setLoadedEdit] = useState(false);
 
   const categories = type === "income" ? INCOME_CATEGORIES : EXPENSE_CATEGORIES;
 
-  const loadVehicles = useCallback(async () => {
+  const load = useCallback(async () => {
     if (!user?.id) return;
-    const [availableVehicles, activeSession] = await Promise.all([
+
+    const [availableVehicles, activeSession, existing] = await Promise.all([
       getVehicles(user.id),
-      getActiveWorkSession(user.id)
+      getActiveWorkSession(user.id),
+      transactionId ? getTransactionById(user.id, transactionId) : Promise.resolve(null)
     ]);
     setVehicles(availableVehicles);
 
-    setSelectedVehicleId((current) => {
-      if (current && availableVehicles.some((vehicle) => vehicle.id === current)) return current;
-      if (activeSession?.vehicle_id && availableVehicles.some((vehicle) => vehicle.id === activeSession.vehicle_id)) {
-        return activeSession.vehicle_id;
+    if (transactionId && existing && !loadedEdit) {
+      setAmount(centsToBRLInput(existing.amount));
+      setDescription(existing.description ?? "");
+      setSelectedVehicleId(existing.vehicle_id);
+      if (categories.includes(existing.category)) {
+        setCategory(existing.category);
+        setCustomCategory("");
+      } else {
+        setCategory("Outros");
+        setCustomCategory(existing.category);
       }
-      return availableVehicles.find((vehicle) => vehicle.is_default)?.id ?? availableVehicles[0]?.id ?? null;
-    });
-  }, [user?.id]);
+      setLoadedEdit(true);
+      return;
+    }
+
+    if (!transactionId) {
+      setSelectedVehicleId((current) => {
+        if (current && availableVehicles.some((vehicle) => vehicle.id === current)) return current;
+        if (activeSession?.vehicle_id && availableVehicles.some((vehicle) => vehicle.id === activeSession.vehicle_id)) {
+          return activeSession.vehicle_id;
+        }
+        return availableVehicles.find((vehicle) => vehicle.is_default)?.id ?? availableVehicles[0]?.id ?? null;
+      });
+    }
+  }, [categories, loadedEdit, transactionId, user?.id]);
 
   useFocusEffect(
     useCallback(() => {
-      loadVehicles();
-    }, [loadVehicles])
+      load();
+    }, [load])
   );
 
   async function handleSave() {
@@ -71,14 +93,25 @@ export default function AddTransactionScreen({ route, navigation }: any) {
 
     setSaving(true);
     try {
-      await addTransaction({
-        userId: user.id,
-        vehicleId: selectedVehicleId,
-        type,
-        category: finalCategory,
-        amountInCents,
-        description: description.trim() || undefined
-      });
+      if (transactionId) {
+        await updateTransaction({
+          userId: user.id,
+          id: transactionId,
+          vehicleId: selectedVehicleId,
+          category: finalCategory,
+          amountInCents,
+          description: description.trim() || undefined
+        });
+      } else {
+        await addTransaction({
+          userId: user.id,
+          vehicleId: selectedVehicleId,
+          type,
+          category: finalCategory,
+          amountInCents,
+          description: description.trim() || undefined
+        });
+      }
       navigation.goBack();
     } catch (err: any) {
       Alert.alert("Erro ao salvar", err?.message ?? "Erro desconhecido");
@@ -90,17 +123,21 @@ export default function AddTransactionScreen({ route, navigation }: any) {
   return (
     <SafeAreaView style={styles.container} edges={["bottom"]}>
       <ScrollView contentContainerStyle={styles.content} keyboardShouldPersistTaps="handled">
-        <Text style={styles.title}>{type === "income" ? "Nova receita" : "Nova despesa"}</Text>
+        <Text style={styles.title}>
+          {isEditing ? "Editar lançamento" : type === "income" ? "Nova receita" : "Nova despesa"}
+        </Text>
 
         <Text style={styles.label}>Valor (R$)</Text>
         <TextInput
-          style={styles.input}
-          keyboardType="decimal-pad"
+          style={[styles.input, styles.amountInput]}
+          keyboardType="number-pad"
           placeholder="0,00"
           placeholderTextColor="#64748B"
           value={amount}
-          onChangeText={setAmount}
+          onChangeText={(text) => setAmount(formatBRLDigitsInput(text))}
+          selectTextOnFocus
         />
+        <Text style={styles.helper}>Digite apenas os números. Ex.: 1111 vira 11,11.</Text>
 
         <Text style={styles.label}>Categoria</Text>
         <View style={styles.chipRow}>
@@ -161,7 +198,9 @@ export default function AddTransactionScreen({ route, navigation }: any) {
           onPress={handleSave}
           disabled={saving}
         >
-          <Text style={styles.saveButtonText}>{saving ? "Salvando..." : "Salvar lançamento"}</Text>
+          <Text style={styles.saveButtonText}>
+            {saving ? "Salvando..." : isEditing ? "Salvar alterações" : "Salvar lançamento"}
+          </Text>
         </Pressable>
       </ScrollView>
     </SafeAreaView>
@@ -173,8 +212,9 @@ const styles = StyleSheet.create({
   content: { padding: 20, paddingBottom: 40 },
   title: { color: "#fff", fontSize: 22, fontWeight: "700", marginBottom: 8 },
   label: { color: "#94A3B8", fontSize: 13, marginBottom: 6, marginTop: 16 },
-  helper: { color: "#64748B", fontSize: 11, marginTop: -2, marginBottom: 8 },
+  helper: { color: "#64748B", fontSize: 11, marginTop: 6, marginBottom: 8 },
   input: { backgroundColor: "#1E293B", color: "#fff", padding: 14, borderRadius: 10, fontSize: 16 },
+  amountInput: { fontSize: 24, fontWeight: "700", textAlign: "right" },
   extraInput: { marginTop: 10 },
   chipRow: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
   chip: {
