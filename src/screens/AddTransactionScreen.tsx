@@ -1,4 +1,4 @@
-import React, { useCallback, useState } from "react";
+import React, { useCallback, useRef, useState } from "react";
 import { Alert, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useFocusEffect } from "@react-navigation/native";
@@ -22,10 +22,12 @@ const EXPENSE_CATEGORIES = [
   "Financiamento/locação",
   "Outros"
 ];
+const QUICK_AMOUNTS = [10, 20, 30, 50];
 
 export default function AddTransactionScreen({ route, navigation }: any) {
   const type: "income" | "expense" = route.params?.type ?? "income";
   const { user } = useAuth();
+  const amountRef = useRef<TextInput>(null);
   const [amount, setAmount] = useState("");
   const [category, setCategory] = useState((type === "income" ? INCOME_CATEGORIES : EXPENSE_CATEGORIES)[0]);
   const [customCategory, setCustomCategory] = useState("");
@@ -56,14 +58,22 @@ export default function AddTransactionScreen({ route, navigation }: any) {
   useFocusEffect(
     useCallback(() => {
       loadVehicles();
+      const timer = setTimeout(() => amountRef.current?.focus(), 150);
+      return () => clearTimeout(timer);
     }, [loadVehicles])
   );
 
+  function applyQuickAmount(value: number) {
+    setAmount(value.toFixed(2).replace(".", ","));
+    amountRef.current?.focus();
+  }
+
   async function handleSave() {
-    if (!user?.id) return;
+    if (!user?.id || saving) return;
     const amountInCents = parseBRLInputToCents(amount);
     if (amountInCents <= 0) {
       Alert.alert("Informe um valor válido");
+      amountRef.current?.focus();
       return;
     }
 
@@ -91,16 +101,29 @@ export default function AddTransactionScreen({ route, navigation }: any) {
     <SafeAreaView style={styles.container} edges={["bottom"]}>
       <ScrollView contentContainerStyle={styles.content} keyboardShouldPersistTaps="handled">
         <Text style={styles.title}>{type === "income" ? "Nova receita" : "Nova despesa"}</Text>
+        <Text style={styles.helperTop}>Registre o valor primeiro. Categoria e veículo já vêm pré-selecionados para agilizar.</Text>
 
         <Text style={styles.label}>Valor (R$)</Text>
         <TextInput
-          style={styles.input}
+          ref={amountRef}
+          style={[styles.input, styles.amountInput]}
           keyboardType="decimal-pad"
+          returnKeyType="done"
           placeholder="0,00"
           placeholderTextColor="#64748B"
           value={amount}
           onChangeText={setAmount}
+          onSubmitEditing={handleSave}
+          selectTextOnFocus
         />
+
+        <View style={styles.quickAmountRow}>
+          {QUICK_AMOUNTS.map((value) => (
+            <Pressable key={value} style={styles.quickAmountChip} onPress={() => applyQuickAmount(value)}>
+              <Text style={styles.quickAmountText}>R$ {value}</Text>
+            </Pressable>
+          ))}
+        </View>
 
         <Text style={styles.label}>Categoria</Text>
         <View style={styles.chipRow}>
@@ -154,14 +177,16 @@ export default function AddTransactionScreen({ route, navigation }: any) {
           placeholderTextColor="#64748B"
           value={description}
           onChangeText={setDescription}
+          returnKeyType="done"
+          onSubmitEditing={handleSave}
         />
 
         <Pressable
-          style={[styles.saveButton, { backgroundColor: type === "income" ? "#22C55E" : "#EF4444" }]}
+          style={[styles.saveButton, { backgroundColor: type === "income" ? "#22C55E" : "#EF4444" }, saving && styles.disabledButton]}
           onPress={handleSave}
           disabled={saving}
         >
-          <Text style={styles.saveButtonText}>{saving ? "Salvando..." : "Salvar lançamento"}</Text>
+          <Text style={styles.saveButtonText}>{saving ? "Salvando..." : type === "income" ? "Salvar receita" : "Salvar despesa"}</Text>
         </Pressable>
       </ScrollView>
     </SafeAreaView>
@@ -171,14 +196,19 @@ export default function AddTransactionScreen({ route, navigation }: any) {
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: "#0F172A" },
   content: { padding: 20, paddingBottom: 40 },
-  title: { color: "#fff", fontSize: 22, fontWeight: "700", marginBottom: 8 },
+  title: { color: "#fff", fontSize: 22, fontWeight: "700", marginBottom: 4 },
+  helperTop: { color: "#64748B", fontSize: 12, lineHeight: 18, marginBottom: 4 },
   label: { color: "#94A3B8", fontSize: 13, marginBottom: 6, marginTop: 16 },
   helper: { color: "#64748B", fontSize: 11, marginTop: -2, marginBottom: 8 },
   input: { backgroundColor: "#1E293B", color: "#fff", padding: 14, borderRadius: 10, fontSize: 16 },
+  amountInput: { fontSize: 28, fontWeight: "800", paddingVertical: 16 },
   extraInput: { marginTop: 10 },
+  quickAmountRow: { flexDirection: "row", gap: 8, marginTop: 10 },
+  quickAmountChip: { flex: 1, backgroundColor: "#172554", borderRadius: 10, paddingVertical: 11, alignItems: "center" },
+  quickAmountText: { color: "#38BDF8", fontWeight: "800", fontSize: 13 },
   chipRow: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
   chip: {
-    paddingVertical: 8,
+    paddingVertical: 9,
     paddingHorizontal: 14,
     borderRadius: 20,
     backgroundColor: "#1E293B"
@@ -186,6 +216,7 @@ const styles = StyleSheet.create({
   chipActive: { backgroundColor: "#38BDF8" },
   chipText: { color: "#94A3B8", fontSize: 13 },
   chipTextActive: { color: "#0F172A", fontWeight: "700" },
-  saveButton: { marginTop: 32, padding: 16, borderRadius: 10, alignItems: "center" },
-  saveButtonText: { color: "#0F172A", fontWeight: "700", fontSize: 16 }
+  saveButton: { marginTop: 28, padding: 17, borderRadius: 12, alignItems: "center" },
+  disabledButton: { opacity: 0.6 },
+  saveButtonText: { color: "#0F172A", fontWeight: "800", fontSize: 16 }
 });
