@@ -263,6 +263,63 @@ export async function deleteTransaction(userId: string, id: string): Promise<voi
   );
 }
 
+export async function getTransactionById(userId: string, id: string): Promise<Transaction | null> {
+  const db = await getDb();
+  const row = await db.getFirstAsync<Transaction>(
+    `SELECT t.* FROM transactions t
+     WHERE t.user_id = ? AND t.id = ?
+       AND NOT EXISTS (
+         SELECT 1 FROM pending_deletes pd
+         WHERE pd.user_id = t.user_id
+           AND pd.table_name = 'transactions'
+           AND pd.record_id = t.id
+       )
+     LIMIT 1`,
+    [userId, id]
+  );
+  return row ?? null;
+}
+
+export async function updateTransaction(params: {
+  userId: string;
+  id: string;
+  vehicleId: string | null;
+  category: string;
+  amountInCents: number;
+  description?: string;
+}): Promise<Transaction> {
+  if (params.amountInCents <= 0) {
+    throw new Error("Valor da transação deve ser maior que zero.");
+  }
+
+  const existing = await getTransactionById(params.userId, params.id);
+  if (!existing) throw new Error("Transação não encontrada.");
+
+  const category = params.category.trim();
+  if (!category) throw new Error("Categoria é obrigatória.");
+
+  const updated: Transaction = {
+    ...existing,
+    vehicle_id: params.vehicleId,
+    category,
+    amount: params.amountInCents,
+    description: params.description?.trim() || null,
+    sync_state: "pending",
+    sync_error: null
+  };
+
+  const db = await getDb();
+  await db.runAsync(
+    `UPDATE transactions
+     SET vehicle_id = ?, category = ?, amount = ?, description = ?, sync_state = 'pending', sync_error = NULL
+     WHERE id = ? AND user_id = ?`,
+    [updated.vehicle_id, updated.category, updated.amount, updated.description, updated.id, params.userId]
+  );
+
+  await createTransaction(updated);
+  return updated;
+}
+
 export async function getAllTransactions(
   userId: string,
   opts?: { limit?: number; offset?: number }
