@@ -1,4 +1,9 @@
-import { formatCentsToBRL, parseBRLInputToCents } from "@/utils/formatters";
+import {
+  centsToBRLInput,
+  formatBRLDigitsInput,
+  formatCentsToBRL,
+  parseBRLInputToCents
+} from "@/utils/formatters";
 
 describe("formatCentsToBRL", () => {
   it("formata centavos como moeda brasileira", () => {
@@ -18,6 +23,31 @@ describe("formatCentsToBRL", () => {
   });
 });
 
+describe("formatBRLDigitsInput", () => {
+  it("desloca os dígitos como centavos durante a digitação", () => {
+    expect(formatBRLDigitsInput("1")).toBe("0,01");
+    expect(formatBRLDigitsInput("11")).toBe("0,11");
+    expect(formatBRLDigitsInput("111")).toBe("1,11");
+    expect(formatBRLDigitsInput("1111")).toBe("11,11");
+    expect(formatBRLDigitsInput("2000")).toBe("20,00");
+  });
+
+  it("reformata mesmo quando recebe valor já mascarado", () => {
+    expect(formatBRLDigitsInput("1.234,56")).toBe("1.234,56");
+  });
+
+  it("retorna vazio quando não há dígitos", () => {
+    expect(formatBRLDigitsInput("")).toBe("");
+  });
+});
+
+describe("centsToBRLInput", () => {
+  it("transforma centavos no valor editável sem símbolo", () => {
+    expect(centsToBRLInput(1111)).toBe("11,11");
+    expect(centsToBRLInput(123456)).toBe("1.234,56");
+  });
+});
+
 describe("parseBRLInputToCents", () => {
   it("converte '10,50' para 1050 centavos", () => {
     expect(parseBRLInputToCents("10,50")).toBe(1050);
@@ -29,6 +59,10 @@ describe("parseBRLInputToCents", () => {
 
   it("ignora símbolo de moeda e espaços", () => {
     expect(parseBRLInputToCents("R$ 25,00")).toBe(2500);
+  });
+
+  it("interpreta corretamente valores com separador de milhar pt-BR", () => {
+    expect(parseBRLInputToCents("1.234,56")).toBe(123456);
   });
 
   it("trata string vazia como zero", () => {

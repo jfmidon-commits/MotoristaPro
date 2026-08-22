@@ -15,7 +15,7 @@ const SYNC_LABEL: Record<Transaction["sync_state"], string> = {
   error: "⚠ Erro"
 };
 
-export default function TransactionsScreen() {
+export default function TransactionsScreen({ navigation }: any) {
   const { user } = useAuth();
   const [transactions, setTransactions] = useState<Transaction[]>([]);
   const [loadingMore, setLoadingMore] = useState(false);
@@ -41,6 +41,10 @@ export default function TransactionsScreen() {
     setTransactions((prev) => [...prev, ...rows]);
     setHasMore(rows.length === PAGE_SIZE);
     setLoadingMore(false);
+  }
+
+  function editTransaction(item: Transaction) {
+    navigation.navigate("AddTransaction", { type: item.type, transactionId: item.id });
   }
 
   function confirmDelete(item: Transaction) {
@@ -75,19 +79,29 @@ export default function TransactionsScreen() {
         ListEmptyComponent={<Text style={styles.empty}>Nenhuma transação ainda.</Text>}
         ListFooterComponent={loadingMore ? <ActivityIndicator color="#38BDF8" style={{ marginTop: 12 }} /> : null}
         renderItem={({ item }) => (
-          <Pressable style={styles.row} onLongPress={() => confirmDelete(item)} delayLongPress={350}>
+          <Pressable
+            style={styles.row}
+            onPress={() => editTransaction(item)}
+            onLongPress={() => confirmDelete(item)}
+            delayLongPress={350}
+          >
             <View style={{ flex: 1 }}>
               <Text style={styles.category}>{item.category}</Text>
               {item.description ? <Text style={styles.description}>{item.description}</Text> : null}
               <Text style={styles.syncState}>{SYNC_LABEL[item.sync_state]}</Text>
             </View>
-            <Text style={[styles.amount, { color: item.type === "income" ? "#22C55E" : "#EF4444" }]}>
-              {item.type === "income" ? "+" : "-"} {formatCentsToBRL(item.amount)}
-            </Text>
+            <View style={styles.rightSide}>
+              <Text style={[styles.amount, { color: item.type === "income" ? "#22C55E" : "#EF4444" }]}>
+                {item.type === "income" ? "+" : "-"} {formatCentsToBRL(item.amount)}
+              </Text>
+              <Text style={styles.editLabel}>Editar</Text>
+            </View>
           </Pressable>
         )}
       />
-      {transactions.length > 0 && <Text style={styles.hint}>Segure uma transação para excluir</Text>}
+      {transactions.length > 0 && (
+        <Text style={styles.hint}>Toque para editar • segure para excluir</Text>
+      )}
     </SafeAreaView>
   );
 }
@@ -95,7 +109,7 @@ export default function TransactionsScreen() {
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: "#0F172A" },
   empty: { color: "#64748B", textAlign: "center", marginTop: 40 },
-  hint: { color: "#475569", textAlign: "center", fontSize: 12, paddingBottom: 12 },
+  hint: { color: "#64748B", textAlign: "center", fontSize: 12, paddingBottom: 12 },
   row: {
     flexDirection: "row",
     justifyContent: "space-between",
@@ -105,8 +119,10 @@ const styles = StyleSheet.create({
     padding: 14,
     marginBottom: 10
   },
+  rightSide: { alignItems: "flex-end", marginLeft: 12 },
   category: { color: "#fff", fontWeight: "600", fontSize: 15 },
   description: { color: "#94A3B8", fontSize: 13, marginTop: 2 },
   syncState: { color: "#64748B", fontSize: 11, marginTop: 4 },
-  amount: { fontWeight: "700", fontSize: 15 }
+  amount: { fontWeight: "700", fontSize: 15 },
+  editLabel: { color: "#38BDF8", fontSize: 11, marginTop: 4, fontWeight: "600" }
 });
