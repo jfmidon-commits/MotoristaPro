@@ -17,11 +17,19 @@ export type SyncDiagnosticsResult = {
   items: SyncDiagnosticItem[];
 };
 
-export async function runSyncDiagnostics(userId?: string | null): Promise<SyncDiagnosticsResult> {
+type DiagnosticsOptions = {
+  supabaseUrl?: string;
+  supabaseKey?: string;
+};
+
+export async function runSyncDiagnostics(
+  userId?: string | null,
+  options?: DiagnosticsOptions
+): Promise<SyncDiagnosticsResult> {
   const items: SyncDiagnosticItem[] = [];
 
-  const url = process.env.EXPO_PUBLIC_SUPABASE_URL;
-  const key = process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY;
+  const url = options?.supabaseUrl ?? process.env.EXPO_PUBLIC_SUPABASE_URL;
+  const key = options?.supabaseKey ?? process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY;
   const environmentOk = Boolean(url && key);
   items.push({
     key: "environment",
@@ -58,11 +66,12 @@ export async function runSyncDiagnostics(userId?: string | null): Promise<SyncDi
   }
 
   let sessionUserId: string | null = null;
+  let sessionOk = false;
   try {
     const { data, error } = await supabase.auth.getSession();
     if (error) throw error;
     sessionUserId = data.session?.user?.id ?? null;
-    const sessionOk = Boolean(sessionUserId && (!userId || sessionUserId === userId));
+    sessionOk = Boolean(sessionUserId && (!userId || sessionUserId === userId));
     items.push({
       key: "session",
       label: "Sessão",
@@ -82,7 +91,7 @@ export async function runSyncDiagnostics(userId?: string | null): Promise<SyncDi
     });
   }
 
-  if (!environmentOk || !networkOk || !sessionUserId) {
+  if (!environmentOk || !networkOk || !sessionOk || !sessionUserId) {
     items.push({
       key: "remoteDatabase",
       label: "Supabase remoto",
