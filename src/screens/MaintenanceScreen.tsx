@@ -29,6 +29,7 @@ export default function MaintenanceScreen({ navigation, route }: any) {
   const { user } = useAuth();
   const requestedVehicleId = route.params?.vehicleId as string | undefined;
   const requestedCategory = route.params?.category as string | undefined;
+  const requestedPreventivePlanId = route.params?.preventivePlanId as string | undefined;
   const knownRequestedCategory = isKnownCategory(requestedCategory);
 
   const [vehicles, setVehicles] = useState<Vehicle[]>([]);
@@ -98,6 +99,7 @@ export default function MaintenanceScreen({ navigation, route }: any) {
       await addMaintenanceEvent({
         userId: user.id,
         vehicleId: selectedVehicleId,
+        preventivePlanId: requestedPreventivePlanId,
         description,
         costInCents,
         odometerKm

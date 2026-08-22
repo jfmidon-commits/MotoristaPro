@@ -275,7 +275,7 @@ export default function PreventiveMaintenanceScreen({ navigation }: any) {
             <View style={styles.actions}>
               <Pressable
                 style={styles.primaryAction}
-                onPress={() => navigation.navigate("Maintenance", { vehicleId: item.plan.vehicle_id, category: item.plan.category })}
+                onPress={() => navigation.navigate("Maintenance", { vehicleId: item.plan.vehicle_id, category: item.plan.category, preventivePlanId: item.plan.id })}
               >
                 <Text style={styles.primaryActionText}>Registrar manutenção</Text>
               </Pressable>
