@@ -13,6 +13,7 @@ interface AuthContextValue {
 }
 
 const AuthContext = createContext<AuthContextValue | undefined>(undefined);
+const EMAIL_CONFIRM_REDIRECT = "motoristapro://auth/confirm";
 
 export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [session, setSession] = useState<Session | null>(null);
@@ -59,7 +60,11 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   const signUp: AuthContextValue["signUp"] = async (email, password) => {
     try {
-      const { error } = await supabase.auth.signUp({ email, password });
+      const { error } = await supabase.auth.signUp({
+        email,
+        password,
+        options: { emailRedirectTo: EMAIL_CONFIRM_REDIRECT }
+      });
       return { error: error?.message ?? null };
     } catch (error: any) {
       return { error: error?.message ?? "Falha ao criar a conta. Verifique sua conexão e tente novamente." };
