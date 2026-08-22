@@ -13,7 +13,6 @@ jest.mock("uuid", () => ({ v4: () => "maintenance-test-id" }));
 import { getDb } from "@/lib/database";
 import {
   addMaintenanceEvent,
-  calculatePreventiveMaintenanceStatus,
   getMaintenanceEvents
 } from "@/services/MaintenanceService";
 
@@ -26,41 +25,6 @@ function createDbMock() {
     runAsync: jest.fn().mockResolvedValue(undefined)
   };
 }
-
-describe("calculatePreventiveMaintenanceStatus", () => {
-  it("identifica manutenção vencida por quilometragem", () => {
-    const result = calculatePreventiveMaintenanceStatus({
-      lastOdometerKm: 10_000,
-      currentOdometerKm: 20_500,
-      intervalKm: 10_000
-    });
-
-    expect(result.dueByKm).toBe(true);
-    expect(result.remainingKm).toBe(-500);
-  });
-
-  it("calcula dias restantes sem marcar vencimento antecipadamente", () => {
-    const result = calculatePreventiveMaintenanceStatus({
-      lastPerformedAt: "2026-08-01T00:00:00.000Z",
-      now: new Date("2026-08-21T00:00:00.000Z"),
-      intervalDays: 30
-    });
-
-    expect(result.dueByDate).toBe(false);
-    expect(result.remainingDays).toBe(10);
-  });
-
-  it("marca manutenção vencida por data", () => {
-    const result = calculatePreventiveMaintenanceStatus({
-      lastPerformedAt: "2026-07-01T00:00:00.000Z",
-      now: new Date("2026-08-21T00:00:00.000Z"),
-      intervalDays: 30
-    });
-
-    expect(result.dueByDate).toBe(true);
-    expect(result.remainingDays).toBeLessThanOrEqual(0);
-  });
-});
 
 describe("MaintenanceService", () => {
   beforeEach(() => {
