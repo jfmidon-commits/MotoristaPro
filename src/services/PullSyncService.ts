@@ -159,13 +159,14 @@ export async function pullRemoteState(userId: string): Promise<PullSyncResult> {
     if (!(await shouldAcceptRemote(userId, "maintenance_events", remote.id, local?.sync_state))) continue;
     await db.runAsync(
       `INSERT INTO maintenance_events
-       (id, user_id, vehicle_id, description, cost, odometer_km, performed_at, created_at, sync_state, sync_error)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'synced', NULL)
+       (id, user_id, vehicle_id, preventive_plan_id, description, cost, odometer_km, performed_at, created_at, sync_state, sync_error)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'synced', NULL)
        ON CONFLICT(id) DO UPDATE SET
-         vehicle_id = excluded.vehicle_id, description = excluded.description, cost = excluded.cost,
+         vehicle_id = excluded.vehicle_id, preventive_plan_id = excluded.preventive_plan_id,
+         description = excluded.description, cost = excluded.cost,
          odometer_km = excluded.odometer_km, performed_at = excluded.performed_at,
          created_at = excluded.created_at, sync_state = 'synced', sync_error = NULL`,
-      [remote.id, userId, remote.vehicle_id, remote.description, remote.cost, remote.odometer_km, remote.performed_at, remote.created_at]
+      [remote.id, userId, remote.vehicle_id, remote.preventive_plan_id ?? null, remote.description, remote.cost, remote.odometer_km, remote.performed_at, remote.created_at]
     );
     result.maintenance += 1;
   }

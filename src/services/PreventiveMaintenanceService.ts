@@ -246,19 +246,32 @@ export async function getLatestOdometerForVehicle(userId: string, vehicleId: str
     `SELECT MAX(value) AS odometer_km FROM (
        SELECT end_odometer_km AS value FROM work_sessions
        WHERE user_id = ? AND vehicle_id = ? AND end_odometer_km IS NOT NULL
+         AND NOT EXISTS (
+           SELECT 1 FROM pending_deletes pd
+           WHERE pd.user_id = ? AND pd.table_name = 'work_sessions' AND pd.record_id = work_sessions.id
+         )
        UNION ALL
        SELECT start_odometer_km AS value FROM work_sessions
        WHERE user_id = ? AND vehicle_id = ? AND start_odometer_km IS NOT NULL
+         AND NOT EXISTS (
+           SELECT 1 FROM pending_deletes pd
+           WHERE pd.user_id = ? AND pd.table_name = 'work_sessions' AND pd.record_id = work_sessions.id
+         )
        UNION ALL
        SELECT odometer_km AS value FROM maintenance_events
        WHERE user_id = ? AND vehicle_id = ? AND odometer_km IS NOT NULL
+         AND NOT EXISTS (
+           SELECT 1 FROM pending_deletes pd
+           WHERE pd.user_id = ? AND pd.table_name = 'maintenance_events' AND pd.record_id = maintenance_events.id
+         )
      )`,
-    [userId, vehicleId, userId, vehicleId, userId, vehicleId]
+    [userId, vehicleId, userId, userId, vehicleId, userId, userId, vehicleId, userId]
   );
   return row?.odometer_km ?? null;
 }
 
-function eventMatchesCategory(event: MaintenanceEvent, category: string): boolean {
+/** Fallback textual para registros antigos sem preventive_plan_id */
+function eventMatchesCategoryFallback(event: MaintenanceEvent, category: string): boolean {
   return event.description === category ||
     event.description.startsWith(`${category} —`) ||
     event.description === `Outros — ${category}`;
@@ -279,7 +292,11 @@ export async function getPreventiveMaintenanceOverviewForVehicle(
   return plans
     .filter((plan) => includeInactive || plan.is_active)
     .map((plan) => {
-      const lastEvent = events.find((event) => eventMatchesCategory(event, plan.category)) ?? null;
+      // Prioriza match estrutural por preventive_plan_id; fallback para texto em registros antigos
+      const lastEvent = events
+        .filter((event) => event.preventive_plan_id === plan.id || eventMatchesCategoryFallback(event, plan.category))
+        .sort((a, b) => new Date(b.performed_at).getTime() - new Date(a.performed_at).getTime())[0] ?? null;
+
       const calculated = calculatePreventivePlanStatus({
         intervalKm: plan.interval_km,
         intervalDays: plan.interval_days,

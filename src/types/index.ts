@@ -33,6 +33,7 @@ export interface MaintenanceEvent {
   id: string;
   user_id: string;
   vehicle_id: string;
+  preventive_plan_id: string | null;
   description: string;
   cost: number;
   odometer_km: number | null;

@@ -25,48 +25,6 @@ export const MAINTENANCE_CATEGORIES = [
 
 export type MaintenanceCategory = (typeof MAINTENANCE_CATEGORIES)[number];
 
-export interface PreventiveMaintenanceStatus {
-  dueByKm: boolean;
-  dueByDate: boolean;
-  remainingKm: number | null;
-  remainingDays: number | null;
-}
-
-export function calculatePreventiveMaintenanceStatus(params: {
-  lastOdometerKm?: number | null;
-  currentOdometerKm?: number | null;
-  intervalKm?: number | null;
-  lastPerformedAt?: string | null;
-  now?: Date;
-  intervalDays?: number | null;
-}): PreventiveMaintenanceStatus {
-  let remainingKm: number | null = null;
-  if (
-    params.lastOdometerKm != null &&
-    params.currentOdometerKm != null &&
-    params.intervalKm != null &&
-    params.intervalKm > 0
-  ) {
-    remainingKm = params.lastOdometerKm + params.intervalKm - params.currentOdometerKm;
-  }
-
-  let remainingDays: number | null = null;
-  if (params.lastPerformedAt && params.intervalDays != null && params.intervalDays > 0) {
-    const performedAtMs = new Date(params.lastPerformedAt).getTime();
-    if (Number.isFinite(performedAtMs)) {
-      const dueAtMs = performedAtMs + params.intervalDays * 86_400_000;
-      remainingDays = Math.ceil((dueAtMs - (params.now ?? new Date()).getTime()) / 86_400_000);
-    }
-  }
-
-  return {
-    dueByKm: remainingKm != null && remainingKm <= 0,
-    dueByDate: remainingDays != null && remainingDays <= 0,
-    remainingKm,
-    remainingDays
-  };
-}
-
 export class NoVehicleError extends Error {
   constructor() {
     super("Nenhum veículo cadastrado. Cadastre um veículo antes de lançar manutenção.");
@@ -77,6 +35,7 @@ export class NoVehicleError extends Error {
 export async function addMaintenanceEvent(params: {
   userId: string;
   vehicleId?: string;
+  preventivePlanId?: string | null;
   description: string;
   costInCents: number;
   odometerKm?: number;
@@ -109,6 +68,7 @@ export async function addMaintenanceEvent(params: {
     id: uuidv4(),
     user_id: params.userId,
     vehicle_id: vehicleId,
+    preventive_plan_id: params.preventivePlanId ?? null,
     description,
     cost: params.costInCents,
     odometer_km: params.odometerKm ?? null,
@@ -120,12 +80,13 @@ export async function addMaintenanceEvent(params: {
 
   await db.runAsync(
     `INSERT INTO maintenance_events
-      (id, user_id, vehicle_id, description, cost, odometer_km, performed_at, created_at, sync_state, sync_error)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      (id, user_id, vehicle_id, preventive_plan_id, description, cost, odometer_km, performed_at, created_at, sync_state, sync_error)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       event.id,
       event.user_id,
       event.vehicle_id,
+      event.preventive_plan_id,
       event.description,
       event.cost,
       event.odometer_km,
@@ -151,6 +112,7 @@ export async function syncMaintenanceEvent(event: MaintenanceEvent): Promise<voi
       id: event.id,
       user_id: session.user.id,
       vehicle_id: event.vehicle_id,
+      preventive_plan_id: event.preventive_plan_id,
       description: event.description,
       cost: event.cost,
       odometer_km: event.odometer_km,
@@ -198,8 +160,12 @@ export async function getMaintenanceEvents(
   return db.getAllAsync<MaintenanceEvent>(
     `SELECT * FROM maintenance_events
      WHERE user_id = ? AND vehicle_id = ?
+       AND NOT EXISTS (
+         SELECT 1 FROM pending_deletes pd
+         WHERE pd.user_id = ? AND pd.table_name = 'maintenance_events' AND pd.record_id = maintenance_events.id
+       )
      ORDER BY performed_at DESC`,
-    [userId, vehicleId]
+    [userId, vehicleId, userId]
   );
 }
 
