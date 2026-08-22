@@ -12,6 +12,7 @@ jest.mock("uuid", () => ({ v4: () => "event-test-id" }));
 import { getDb } from "@/lib/database";
 import { getMaintenanceEvents } from "@/services/MaintenanceService";
 import { getPreventiveMaintenanceOverviewForVehicle } from "@/services/PreventiveMaintenanceService";
+import { pullRemoteState } from "@/services/PullSyncService";
 
 const mockedGetDb = getDb as jest.MockedFunction<typeof getDb>;
 const mockedGetMaintenanceEvents = getMaintenanceEvents as jest.MockedFunction<typeof getMaintenanceEvents>;
@@ -74,7 +75,6 @@ describe("PreventiveMaintenancePlanLink", () => {
     db.getFirstAsync.mockResolvedValue({ odometer_km: 60_000 });
     mockedGetDb.mockResolvedValue(db as never);
 
-    // getMaintenanceEvents já filtra por user_id e vehicle_id, então evento de outro usuário não aparece
     mockedGetMaintenanceEvents.mockResolvedValue([]);
 
     const result = await getPreventiveMaintenanceOverviewForVehicle("user-1", "vehicle-1");
@@ -112,7 +112,7 @@ describe("PreventiveMaintenancePlanLink", () => {
 
   it("plano deletado não ressuscita (evento fica com preventive_plan_id órfão, mas cálculo ignora)", async () => {
     const db = createDbMock();
-    db.getAllAsync.mockResolvedValue([]); // plano deletado, não retorna nada
+    db.getAllAsync.mockResolvedValue([]);
     db.getFirstAsync.mockResolvedValue({ odometer_km: 60_000 });
     mockedGetDb.mockResolvedValue(db as never);
 
@@ -128,7 +128,7 @@ describe("PreventiveMaintenancePlanLink", () => {
     ]);
 
     const result = await getPreventiveMaintenanceOverviewForVehicle("user-1", "vehicle-1");
-    expect(result).toHaveLength(0); // nenhum plano ativo = nenhum overview
+    expect(result).toHaveLength(0);
   });
 
   it("evento com preventive_plan_id de outro veículo é rejeitado", async () => {
@@ -144,7 +144,6 @@ describe("PreventiveMaintenancePlanLink", () => {
     db.getFirstAsync.mockResolvedValue({ odometer_km: 60_000 });
     mockedGetDb.mockResolvedValue(db as never);
 
-    // Evento vinculado a plano de outro veículo — getMaintenanceEvents filtra por vehicle_id, então não aparece
     mockedGetMaintenanceEvents.mockResolvedValue([]);
 
     const result = await getPreventiveMaintenanceOverviewForVehicle("user-1", "vehicle-1");
@@ -176,7 +175,7 @@ describe("PreventiveMaintenancePlanLink", () => {
     ]);
 
     const result = await getPreventiveMaintenanceOverviewForVehicle("user-1", "vehicle-1");
-    expect(result[0].remainingKm).toBe(5_000); // 50k + 40k - 85k = 5k
+    expect(result[0].remainingKm).toBe(5_000);
     expect(result[0].status).toBe("ok");
   });
 
@@ -205,15 +204,11 @@ describe("PreventiveMaintenancePlanLink", () => {
     ]);
 
     const result = await getPreventiveMaintenanceOverviewForVehicle("user-1", "vehicle-1", new Date("2026-08-21T00:00:00.000Z"));
-    // 2025-08-01 + 365 dias = 2026-08-01; em 2026-08-21 está 20 dias vencido
     expect(result[0].remainingDays).toBeLessThanOrEqual(0);
     expect(result[0].status).toBe("overdue");
   });
 
-  it("pending local não é sobrescrito incorretamente por pull remoto", async () => {
-    // Verificação estática: PullSyncService preserva sync_state local 'pending'
-    // e não sobrescreve com remoto quando local está pending
-    const { pullRemoteState } = await import("@/services/PullSyncService");
+  it("pending local não é sobrescrito incorretamente por pull remoto", () => {
     expect(typeof pullRemoteState).toBe("function");
   });
 });
