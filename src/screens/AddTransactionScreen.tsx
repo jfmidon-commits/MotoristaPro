@@ -11,7 +11,8 @@ import type { Vehicle } from "@/types";
 
 const INCOME_CATEGORIES = ["Corrida", "Gorjeta", "Bônus", "Promoções", "Outros"];
 const EXPENSE_CATEGORIES = ["Combustível", "Pedágio", "Estacionamento", "Lavagem", "Manutenção", "Alimentação", "Multa", "Seguro", "Financiamento/locação", "Outros"];
-const QUICK_AMOUNTS = [10, 20, 30, 50];
+const INCOME_QUICK_AMOUNTS = [10, 20, 30, 50];
+const EXPENSE_QUICK_AMOUNTS = [10, 20, 50, 100];
 
 export default function AddTransactionScreen({ route, navigation }: any) {
   const type: "income" | "expense" = route.params?.type ?? "income";
@@ -24,11 +25,13 @@ export default function AddTransactionScreen({ route, navigation }: any) {
   const [vehicles, setVehicles] = useState<Vehicle[]>([]);
   const [selectedVehicleId, setSelectedVehicleId] = useState<string | null>(null);
   const [activeShiftVehicleId, setActiveShiftVehicleId] = useState<string | null>(null);
-  const [showDetails, setShowDetails] = useState(type === "expense");
+  const [showDetails, setShowDetails] = useState(false);
   const [saving, setSaving] = useState(false);
 
   const categories = type === "income" ? INCOME_CATEGORIES : EXPENSE_CATEGORIES;
+  const quickAmounts = type === "income" ? INCOME_QUICK_AMOUNTS : EXPENSE_QUICK_AMOUNTS;
   const fastRideMode = type === "income" && !!activeShiftVehicleId && !showDetails && category === "Corrida";
+  const compactExpenseMode = type === "expense" && !!activeShiftVehicleId && !showDetails;
   const selectedVehicle = vehicles.find((vehicle) => vehicle.id === selectedVehicleId) ?? null;
 
   const loadVehicles = useCallback(async () => {
@@ -74,32 +77,61 @@ export default function AddTransactionScreen({ route, navigation }: any) {
     }
   }
 
+  function renderCategorySelector() {
+    return (
+      <>
+        <Text style={styles.label}>Categoria</Text>
+        <View style={styles.chipRow}>
+          {categories.map((item) => (
+            <Pressable key={item} style={[styles.chip, category === item && styles.chipActive]} onPress={() => setCategory(item)}>
+              <Text style={[styles.chipText, category === item && styles.chipTextActive]}>{item}</Text>
+            </Pressable>
+          ))}
+        </View>
+        {category === "Outros" ? (
+          <TextInput style={[styles.input, styles.extraInput]} placeholder="Nome da categoria" placeholderTextColor="#64748B" value={customCategory} onChangeText={setCustomCategory} />
+        ) : null}
+      </>
+    );
+  }
+
   return (
     <SafeAreaView style={styles.container} edges={["bottom"]}>
       <ScrollView contentContainerStyle={styles.content} keyboardShouldPersistTaps="handled">
-        <Text style={styles.title}>{fastRideMode ? "Registrar corrida" : type === "income" ? "Nova receita" : "Nova despesa"}</Text>
-        <Text style={styles.helperTop}>{fastRideMode ? `Corrida vinculada ao turno${selectedVehicle ? ` • ${selectedVehicle.name}` : ""}.` : "Registre o valor primeiro. Os campos principais já vêm pré-selecionados."}</Text>
+        <Text style={styles.title}>{fastRideMode ? "Registrar corrida" : compactExpenseMode ? "Registrar despesa" : type === "income" ? "Nova receita" : "Nova despesa"}</Text>
+        <Text style={styles.helperTop}>
+          {fastRideMode
+            ? `Corrida vinculada ao turno${selectedVehicle ? ` • ${selectedVehicle.name}` : ""}.`
+            : compactExpenseMode
+              ? `Despesa vinculada ao turno${selectedVehicle ? ` • ${selectedVehicle.name}` : ""}. Escolha a categoria e salve.`
+              : "Registre o valor primeiro. Os campos principais já vêm pré-selecionados."}
+        </Text>
 
         <Text style={styles.label}>Valor (R$)</Text>
         <TextInput ref={amountRef} style={[styles.input, styles.amountInput]} keyboardType="decimal-pad" returnKeyType="done" placeholder="0,00" placeholderTextColor="#64748B" value={amount} onChangeText={setAmount} onSubmitEditing={handleSave} selectTextOnFocus />
 
-        <View style={styles.quickAmountRow}>{QUICK_AMOUNTS.map((value) => <Pressable key={value} style={styles.quickAmountChip} onPress={() => applyQuickAmount(value)}><Text style={styles.quickAmountText}>R$ {value}</Text></Pressable>)}</View>
+        <View style={styles.quickAmountRow}>
+          {quickAmounts.map((value) => <Pressable key={value} style={styles.quickAmountChip} onPress={() => applyQuickAmount(value)}><Text style={styles.quickAmountText}>R$ {value}</Text></Pressable>)}
+        </View>
 
         {fastRideMode ? (
           <>
             <Pressable style={[styles.saveButton, styles.incomeSave, saving && styles.disabledButton]} onPress={handleSave} disabled={saving}>
               <Text style={styles.saveButtonText}>{saving ? "Salvando..." : "Salvar corrida"}</Text>
             </Pressable>
-            <Pressable style={styles.detailsButton} onPress={() => setShowDetails(true)}>
-              <Text style={styles.detailsButtonText}>Mais opções: categoria, veículo e descrição</Text>
+            <Pressable style={styles.detailsButton} onPress={() => setShowDetails(true)}><Text style={styles.detailsButtonText}>Mais opções: categoria, veículo e descrição</Text></Pressable>
+          </>
+        ) : compactExpenseMode ? (
+          <>
+            {renderCategorySelector()}
+            <Pressable style={[styles.saveButton, styles.expenseSave, saving && styles.disabledButton]} onPress={handleSave} disabled={saving}>
+              <Text style={styles.saveButtonText}>{saving ? "Salvando..." : `Salvar ${category.toLowerCase()}`}</Text>
             </Pressable>
+            <Pressable style={styles.detailsButton} onPress={() => setShowDetails(true)}><Text style={styles.detailsButtonText}>Mais opções: veículo e descrição</Text></Pressable>
           </>
         ) : (
           <>
-            <Text style={styles.label}>Categoria</Text>
-            <View style={styles.chipRow}>{categories.map((item) => <Pressable key={item} style={[styles.chip, category === item && styles.chipActive]} onPress={() => setCategory(item)}><Text style={[styles.chipText, category === item && styles.chipTextActive]}>{item}</Text></Pressable>)}</View>
-
-            {category === "Outros" ? <TextInput style={[styles.input, styles.extraInput]} placeholder="Nome da categoria" placeholderTextColor="#64748B" value={customCategory} onChangeText={setCustomCategory} /> : null}
+            {renderCategorySelector()}
 
             <Text style={styles.label}>Veículo</Text>
             <Text style={styles.helper}>{activeShiftVehicleId ? "O veículo do turno já está selecionado." : "Escolha onde este lançamento deve ser contabilizado."}</Text>
@@ -115,7 +147,16 @@ export default function AddTransactionScreen({ route, navigation }: any) {
               <Text style={styles.saveButtonText}>{saving ? "Salvando..." : type === "income" ? "Salvar receita" : "Salvar despesa"}</Text>
             </Pressable>
 
-            {type === "income" && activeShiftVehicleId ? <Pressable style={styles.detailsButton} onPress={() => { setCategory("Corrida"); setDescription(""); setSelectedVehicleId(activeShiftVehicleId); setShowDetails(false); }}><Text style={styles.detailsButtonText}>Voltar ao modo rápido de corrida</Text></Pressable> : null}
+            {activeShiftVehicleId ? (
+              <Pressable style={styles.detailsButton} onPress={() => {
+                setDescription("");
+                setSelectedVehicleId(activeShiftVehicleId);
+                if (type === "income") setCategory("Corrida");
+                setShowDetails(false);
+              }}>
+                <Text style={styles.detailsButtonText}>{type === "income" ? "Voltar ao modo rápido de corrida" : "Voltar ao modo rápido de despesa"}</Text>
+              </Pressable>
+            ) : null}
           </>
         )}
       </ScrollView>
