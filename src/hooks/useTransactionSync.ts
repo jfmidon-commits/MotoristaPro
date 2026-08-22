@@ -20,6 +20,7 @@ import type { SyncStatusSnapshot } from "@/types";
 
 const MAX_ATTEMPTS = 5;
 const BASE_DELAY_MS = 5000;
+const PERIODIC_SYNC_MS = 10_000;
 type RetryMeta = { attempts: number; lastAttemptAt: number };
 const retryMeta = new Map<string, RetryMeta>();
 
@@ -39,11 +40,12 @@ function registerTransactionAttempt(id: string) {
 
 export function useTransactionSync() {
   const { user, isAuthenticated } = useAuth();
+  const [statusReady, setStatusReady] = useState(false);
   const [status, setStatus] = useState<SyncStatusSnapshot>({
     pendingTransactions: 0,
     pendingVehicles: 0,
     pendingMaintenance: 0,
-    pendingWorkSessions: 0,
+    pendingWorkSessions: 1,
     pendingPreventiveMaintenance: 0,
     pendingDeletes: 0,
     lastSyncAttemptAt: null,
@@ -71,12 +73,16 @@ export function useTransactionSync() {
       pendingPreventiveMaintenance: preventive.length,
       pendingDeletes: del.length
     }));
+    setStatusReady(true);
   }, [user?.id]);
 
   const syncNow = useCallback(async (opts?: { force?: boolean }) => {
     if (!isAuthenticated || !user?.id || isSyncing.current) return;
     const net = await NetInfo.fetch();
-    if (!net.isConnected || net.isInternetReachable === false) return;
+    if (!net.isConnected || net.isInternetReachable === false) {
+      await updateStatus();
+      return;
+    }
 
     const force = opts?.force === true;
     isSyncing.current = true;
@@ -135,13 +141,15 @@ export function useTransactionSync() {
             ? `${totalPending} item(ns) ainda aguardam sincronização.`
             : null
       }));
+      setStatusReady(true);
     } catch (err: any) {
       console.log("[SYNC] erro inesperado no syncNow", err);
       setStatus((s) => ({ ...s, lastError: err?.message ?? "Erro desconhecido" }));
+      await updateStatus();
     } finally {
       isSyncing.current = false;
     }
-  }, [isAuthenticated, user?.id]);
+  }, [isAuthenticated, user?.id, updateStatus]);
 
   const forceSyncNow = useCallback(async () => {
     retryMeta.clear();
@@ -150,6 +158,7 @@ export function useTransactionSync() {
 
   useEffect(() => {
     retryMeta.clear();
+    setStatusReady(false);
   }, [user?.id]);
 
   useEffect(() => {
@@ -172,5 +181,13 @@ export function useTransactionSync() {
     };
   }, [syncNow]);
 
-  return { status, syncNow: forceSyncNow };
+  useEffect(() => {
+    if (!isAuthenticated) return;
+    const timer = setInterval(() => {
+      syncNow();
+    }, PERIODIC_SYNC_MS);
+    return () => clearInterval(timer);
+  }, [isAuthenticated, syncNow]);
+
+  return { status, statusReady, syncNow: forceSyncNow };
 }
