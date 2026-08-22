@@ -120,7 +120,7 @@ describe("PreventiveMaintenanceService", () => {
     await expect(getLatestOdometerForVehicle("user-1", "vehicle-1")).resolves.toBe(78_321);
     expect(db.getFirstAsync).toHaveBeenCalledWith(
       expect.stringContaining("SELECT MAX(value) AS odometer_km"),
-      ["user-1", "vehicle-1", "user-1", "vehicle-1", "user-1", "vehicle-1"]
+      ["user-1", "vehicle-1", "user-1", "user-1", "vehicle-1", "user-1", "user-1", "vehicle-1", "user-1"]
     );
   });
 
