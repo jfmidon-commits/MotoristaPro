@@ -78,7 +78,7 @@ describe("MaintenanceService", () => {
 
     expect(db.getAllAsync).toHaveBeenCalledWith(
       expect.stringContaining("WHERE user_id = ? AND vehicle_id = ?"),
-      ["user-1", "vehicle-1"]
+      ["user-1", "vehicle-1", "user-1"]
     );
   });
 });
