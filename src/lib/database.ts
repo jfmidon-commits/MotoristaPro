@@ -2,7 +2,7 @@ import * as SQLite from "expo-sqlite";
 
 let dbInstance: SQLite.SQLiteDatabase | null = null;
 
-const LATEST_DB_VERSION = 3;
+const LATEST_DB_VERSION = 4;
 
 export async function getDb(): Promise<SQLite.SQLiteDatabase> {
   if (dbInstance) return dbInstance;
@@ -61,6 +61,7 @@ async function migrate(db: SQLite.SQLiteDatabase) {
       id TEXT PRIMARY KEY NOT NULL,
       user_id TEXT NOT NULL,
       vehicle_id TEXT NOT NULL,
+      preventive_plan_id TEXT,
       description TEXT NOT NULL,
       cost INTEGER NOT NULL CHECK (cost >= 0),
       odometer_km INTEGER CHECK (odometer_km IS NULL OR odometer_km >= 0),
@@ -68,7 +69,8 @@ async function migrate(db: SQLite.SQLiteDatabase) {
       created_at TEXT NOT NULL,
       sync_state TEXT NOT NULL DEFAULT 'pending',
       sync_error TEXT,
-      FOREIGN KEY (vehicle_id) REFERENCES vehicles(id)
+      FOREIGN KEY (vehicle_id) REFERENCES vehicles(id),
+      FOREIGN KEY (preventive_plan_id) REFERENCES preventive_maintenance_plans(id)
     );
 
     CREATE TABLE IF NOT EXISTS work_sessions (
@@ -123,6 +125,10 @@ async function migrate(db: SQLite.SQLiteDatabase) {
     await db.execAsync(`ALTER TABLE work_sessions ADD COLUMN sync_error TEXT;`);
   }
 
+  if (!(await hasColumn(db, "maintenance_events", "preventive_plan_id"))) {
+    await db.execAsync(`ALTER TABLE maintenance_events ADD COLUMN preventive_plan_id TEXT REFERENCES preventive_maintenance_plans(id);`);
+  }
+
   await db.execAsync(`
     UPDATE work_sessions
     SET sync_state = 'pending'
@@ -134,6 +140,7 @@ async function migrate(db: SQLite.SQLiteDatabase) {
     CREATE INDEX IF NOT EXISTS idx_transactions_sync ON transactions(sync_state);
     CREATE INDEX IF NOT EXISTS idx_maintenance_vehicle ON maintenance_events(vehicle_id);
     CREATE INDEX IF NOT EXISTS idx_maintenance_user ON maintenance_events(user_id);
+    CREATE INDEX IF NOT EXISTS idx_maintenance_plan ON maintenance_events(preventive_plan_id);
     CREATE INDEX IF NOT EXISTS idx_work_sessions_user_started ON work_sessions(user_id, started_at);
     CREATE INDEX IF NOT EXISTS idx_work_sessions_user ON work_sessions(user_id);
     CREATE INDEX IF NOT EXISTS idx_vehicles_user ON vehicles(user_id);
