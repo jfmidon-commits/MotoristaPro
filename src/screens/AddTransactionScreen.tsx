@@ -10,18 +10,7 @@ import { parseBRLInputToCents } from "@/utils/formatters";
 import type { Vehicle } from "@/types";
 
 const INCOME_CATEGORIES = ["Corrida", "Gorjeta", "Bônus", "Promoções", "Outros"];
-const EXPENSE_CATEGORIES = [
-  "Combustível",
-  "Pedágio",
-  "Estacionamento",
-  "Lavagem",
-  "Manutenção",
-  "Alimentação",
-  "Multa",
-  "Seguro",
-  "Financiamento/locação",
-  "Outros"
-];
+const EXPENSE_CATEGORIES = ["Combustível", "Pedágio", "Estacionamento", "Lavagem", "Manutenção", "Alimentação", "Multa", "Seguro", "Financiamento/locação", "Outros"];
 const QUICK_AMOUNTS = [10, 20, 30, 50];
 
 export default function AddTransactionScreen({ route, navigation }: any) {
@@ -34,34 +23,31 @@ export default function AddTransactionScreen({ route, navigation }: any) {
   const [description, setDescription] = useState("");
   const [vehicles, setVehicles] = useState<Vehicle[]>([]);
   const [selectedVehicleId, setSelectedVehicleId] = useState<string | null>(null);
+  const [activeShiftVehicleId, setActiveShiftVehicleId] = useState<string | null>(null);
+  const [showDetails, setShowDetails] = useState(type === "expense");
   const [saving, setSaving] = useState(false);
 
   const categories = type === "income" ? INCOME_CATEGORIES : EXPENSE_CATEGORIES;
+  const fastRideMode = type === "income" && !!activeShiftVehicleId && !showDetails && category === "Corrida";
+  const selectedVehicle = vehicles.find((vehicle) => vehicle.id === selectedVehicleId) ?? null;
 
   const loadVehicles = useCallback(async () => {
     if (!user?.id) return;
-    const [availableVehicles, activeSession] = await Promise.all([
-      getVehicles(user.id),
-      getActiveWorkSession(user.id)
-    ]);
+    const [availableVehicles, activeSession] = await Promise.all([getVehicles(user.id), getActiveWorkSession(user.id)]);
     setVehicles(availableVehicles);
-
+    setActiveShiftVehicleId(activeSession?.vehicle_id ?? null);
     setSelectedVehicleId((current) => {
       if (current && availableVehicles.some((vehicle) => vehicle.id === current)) return current;
-      if (activeSession?.vehicle_id && availableVehicles.some((vehicle) => vehicle.id === activeSession.vehicle_id)) {
-        return activeSession.vehicle_id;
-      }
+      if (activeSession?.vehicle_id && availableVehicles.some((vehicle) => vehicle.id === activeSession.vehicle_id)) return activeSession.vehicle_id;
       return availableVehicles.find((vehicle) => vehicle.is_default)?.id ?? availableVehicles[0]?.id ?? null;
     });
   }, [user?.id]);
 
-  useFocusEffect(
-    useCallback(() => {
-      loadVehicles();
-      const timer = setTimeout(() => amountRef.current?.focus(), 150);
-      return () => clearTimeout(timer);
-    }, [loadVehicles])
-  );
+  useFocusEffect(useCallback(() => {
+    loadVehicles();
+    const timer = setTimeout(() => amountRef.current?.focus(), 150);
+    return () => clearTimeout(timer);
+  }, [loadVehicles]));
 
   function applyQuickAmount(value: number) {
     setAmount(value.toFixed(2).replace(".", ","));
@@ -76,19 +62,10 @@ export default function AddTransactionScreen({ route, navigation }: any) {
       amountRef.current?.focus();
       return;
     }
-
     const finalCategory = category === "Outros" ? customCategory.trim() || "Outros" : category;
-
     setSaving(true);
     try {
-      await addTransaction({
-        userId: user.id,
-        vehicleId: selectedVehicleId,
-        type,
-        category: finalCategory,
-        amountInCents,
-        description: description.trim() || undefined
-      });
+      await addTransaction({ userId: user.id, vehicleId: selectedVehicleId, type, category: finalCategory, amountInCents, description: description.trim() || undefined });
       navigation.goBack();
     } catch (err: any) {
       Alert.alert("Erro ao salvar", err?.message ?? "Erro desconhecido");
@@ -100,123 +77,52 @@ export default function AddTransactionScreen({ route, navigation }: any) {
   return (
     <SafeAreaView style={styles.container} edges={["bottom"]}>
       <ScrollView contentContainerStyle={styles.content} keyboardShouldPersistTaps="handled">
-        <Text style={styles.title}>{type === "income" ? "Nova receita" : "Nova despesa"}</Text>
-        <Text style={styles.helperTop}>Registre o valor primeiro. Categoria e veículo já vêm pré-selecionados para agilizar.</Text>
+        <Text style={styles.title}>{fastRideMode ? "Registrar corrida" : type === "income" ? "Nova receita" : "Nova despesa"}</Text>
+        <Text style={styles.helperTop}>{fastRideMode ? `Corrida vinculada ao turno${selectedVehicle ? ` • ${selectedVehicle.name}` : ""}.` : "Registre o valor primeiro. Os campos principais já vêm pré-selecionados."}</Text>
 
         <Text style={styles.label}>Valor (R$)</Text>
-        <TextInput
-          ref={amountRef}
-          style={[styles.input, styles.amountInput]}
-          keyboardType="decimal-pad"
-          returnKeyType="done"
-          placeholder="0,00"
-          placeholderTextColor="#64748B"
-          value={amount}
-          onChangeText={setAmount}
-          onSubmitEditing={handleSave}
-          selectTextOnFocus
-        />
+        <TextInput ref={amountRef} style={[styles.input, styles.amountInput]} keyboardType="decimal-pad" returnKeyType="done" placeholder="0,00" placeholderTextColor="#64748B" value={amount} onChangeText={setAmount} onSubmitEditing={handleSave} selectTextOnFocus />
 
-        <View style={styles.quickAmountRow}>
-          {QUICK_AMOUNTS.map((value) => (
-            <Pressable key={value} style={styles.quickAmountChip} onPress={() => applyQuickAmount(value)}>
-              <Text style={styles.quickAmountText}>R$ {value}</Text>
+        <View style={styles.quickAmountRow}>{QUICK_AMOUNTS.map((value) => <Pressable key={value} style={styles.quickAmountChip} onPress={() => applyQuickAmount(value)}><Text style={styles.quickAmountText}>R$ {value}</Text></Pressable>)}</View>
+
+        {fastRideMode ? (
+          <>
+            <Pressable style={[styles.saveButton, styles.incomeSave, saving && styles.disabledButton]} onPress={handleSave} disabled={saving}>
+              <Text style={styles.saveButtonText}>{saving ? "Salvando..." : "Salvar corrida"}</Text>
             </Pressable>
-          ))}
-        </View>
-
-        <Text style={styles.label}>Categoria</Text>
-        <View style={styles.chipRow}>
-          {categories.map((item) => (
-            <Pressable
-              key={item}
-              style={[styles.chip, category === item && styles.chipActive]}
-              onPress={() => setCategory(item)}
-            >
-              <Text style={[styles.chipText, category === item && styles.chipTextActive]}>{item}</Text>
+            <Pressable style={styles.detailsButton} onPress={() => setShowDetails(true)}>
+              <Text style={styles.detailsButtonText}>Mais opções: categoria, veículo e descrição</Text>
             </Pressable>
-          ))}
-        </View>
+          </>
+        ) : (
+          <>
+            <Text style={styles.label}>Categoria</Text>
+            <View style={styles.chipRow}>{categories.map((item) => <Pressable key={item} style={[styles.chip, category === item && styles.chipActive]} onPress={() => setCategory(item)}><Text style={[styles.chipText, category === item && styles.chipTextActive]}>{item}</Text></Pressable>)}</View>
 
-        {category === "Outros" ? (
-          <TextInput
-            style={[styles.input, styles.extraInput]}
-            placeholder="Nome da categoria"
-            placeholderTextColor="#64748B"
-            value={customCategory}
-            onChangeText={setCustomCategory}
-          />
-        ) : null}
+            {category === "Outros" ? <TextInput style={[styles.input, styles.extraInput]} placeholder="Nome da categoria" placeholderTextColor="#64748B" value={customCategory} onChangeText={setCustomCategory} /> : null}
 
-        <Text style={styles.label}>Veículo</Text>
-        <Text style={styles.helper}>Durante um turno, o veículo do turno é selecionado automaticamente.</Text>
-        <View style={styles.chipRow}>
-          <Pressable
-            style={[styles.chip, selectedVehicleId === null && styles.chipActive]}
-            onPress={() => setSelectedVehicleId(null)}
-          >
-            <Text style={[styles.chipText, selectedVehicleId === null && styles.chipTextActive]}>Geral</Text>
-          </Pressable>
-          {vehicles.map((vehicle) => (
-            <Pressable
-              key={vehicle.id}
-              style={[styles.chip, selectedVehicleId === vehicle.id && styles.chipActive]}
-              onPress={() => setSelectedVehicleId(vehicle.id)}
-            >
-              <Text style={[styles.chipText, selectedVehicleId === vehicle.id && styles.chipTextActive]}>
-                {vehicle.name}{vehicle.is_default ? " ★" : ""}
-              </Text>
+            <Text style={styles.label}>Veículo</Text>
+            <Text style={styles.helper}>{activeShiftVehicleId ? "O veículo do turno já está selecionado." : "Escolha onde este lançamento deve ser contabilizado."}</Text>
+            <View style={styles.chipRow}>
+              <Pressable style={[styles.chip, selectedVehicleId === null && styles.chipActive]} onPress={() => setSelectedVehicleId(null)}><Text style={[styles.chipText, selectedVehicleId === null && styles.chipTextActive]}>Geral</Text></Pressable>
+              {vehicles.map((vehicle) => <Pressable key={vehicle.id} style={[styles.chip, selectedVehicleId === vehicle.id && styles.chipActive]} onPress={() => setSelectedVehicleId(vehicle.id)}><Text style={[styles.chipText, selectedVehicleId === vehicle.id && styles.chipTextActive]}>{vehicle.name}{vehicle.is_default ? " ★" : ""}</Text></Pressable>)}
+            </View>
+
+            <Text style={styles.label}>Descrição (opcional)</Text>
+            <TextInput style={styles.input} placeholder={type === "income" ? "Ex: shopping → aeroporto" : "Ex: abastecimento posto central"} placeholderTextColor="#64748B" value={description} onChangeText={setDescription} returnKeyType="done" onSubmitEditing={handleSave} />
+
+            <Pressable style={[styles.saveButton, type === "income" ? styles.incomeSave : styles.expenseSave, saving && styles.disabledButton]} onPress={handleSave} disabled={saving}>
+              <Text style={styles.saveButtonText}>{saving ? "Salvando..." : type === "income" ? "Salvar receita" : "Salvar despesa"}</Text>
             </Pressable>
-          ))}
-        </View>
 
-        <Text style={styles.label}>Descrição (opcional)</Text>
-        <TextInput
-          style={styles.input}
-          placeholder={type === "income" ? "Ex: shopping → aeroporto" : "Ex: abastecimento posto central"}
-          placeholderTextColor="#64748B"
-          value={description}
-          onChangeText={setDescription}
-          returnKeyType="done"
-          onSubmitEditing={handleSave}
-        />
-
-        <Pressable
-          style={[styles.saveButton, { backgroundColor: type === "income" ? "#22C55E" : "#EF4444" }, saving && styles.disabledButton]}
-          onPress={handleSave}
-          disabled={saving}
-        >
-          <Text style={styles.saveButtonText}>{saving ? "Salvando..." : type === "income" ? "Salvar receita" : "Salvar despesa"}</Text>
-        </Pressable>
+            {type === "income" && activeShiftVehicleId ? <Pressable style={styles.detailsButton} onPress={() => { setCategory("Corrida"); setDescription(""); setSelectedVehicleId(activeShiftVehicleId); setShowDetails(false); }}><Text style={styles.detailsButtonText}>Voltar ao modo rápido de corrida</Text></Pressable> : null}
+          </>
+        )}
       </ScrollView>
     </SafeAreaView>
   );
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: "#0F172A" },
-  content: { padding: 20, paddingBottom: 40 },
-  title: { color: "#fff", fontSize: 22, fontWeight: "700", marginBottom: 4 },
-  helperTop: { color: "#64748B", fontSize: 12, lineHeight: 18, marginBottom: 4 },
-  label: { color: "#94A3B8", fontSize: 13, marginBottom: 6, marginTop: 16 },
-  helper: { color: "#64748B", fontSize: 11, marginTop: -2, marginBottom: 8 },
-  input: { backgroundColor: "#1E293B", color: "#fff", padding: 14, borderRadius: 10, fontSize: 16 },
-  amountInput: { fontSize: 28, fontWeight: "800", paddingVertical: 16 },
-  extraInput: { marginTop: 10 },
-  quickAmountRow: { flexDirection: "row", gap: 8, marginTop: 10 },
-  quickAmountChip: { flex: 1, backgroundColor: "#172554", borderRadius: 10, paddingVertical: 11, alignItems: "center" },
-  quickAmountText: { color: "#38BDF8", fontWeight: "800", fontSize: 13 },
-  chipRow: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
-  chip: {
-    paddingVertical: 9,
-    paddingHorizontal: 14,
-    borderRadius: 20,
-    backgroundColor: "#1E293B"
-  },
-  chipActive: { backgroundColor: "#38BDF8" },
-  chipText: { color: "#94A3B8", fontSize: 13 },
-  chipTextActive: { color: "#0F172A", fontWeight: "700" },
-  saveButton: { marginTop: 28, padding: 17, borderRadius: 12, alignItems: "center" },
-  disabledButton: { opacity: 0.6 },
-  saveButtonText: { color: "#0F172A", fontWeight: "800", fontSize: 16 }
+  container: { flex: 1, backgroundColor: "#0F172A" }, content: { padding: 20, paddingBottom: 40 }, title: { color: "#fff", fontSize: 22, fontWeight: "700", marginBottom: 4 }, helperTop: { color: "#64748B", fontSize: 12, lineHeight: 18, marginBottom: 4 }, label: { color: "#94A3B8", fontSize: 13, marginBottom: 6, marginTop: 16 }, helper: { color: "#64748B", fontSize: 11, marginTop: -2, marginBottom: 8 }, input: { backgroundColor: "#1E293B", color: "#fff", padding: 14, borderRadius: 10, fontSize: 16 }, amountInput: { fontSize: 30, fontWeight: "800", paddingVertical: 16 }, extraInput: { marginTop: 10 }, quickAmountRow: { flexDirection: "row", gap: 8, marginTop: 10 }, quickAmountChip: { flex: 1, backgroundColor: "#172554", borderRadius: 10, paddingVertical: 11, alignItems: "center" }, quickAmountText: { color: "#38BDF8", fontWeight: "800", fontSize: 13 }, chipRow: { flexDirection: "row", flexWrap: "wrap", gap: 8 }, chip: { paddingVertical: 9, paddingHorizontal: 14, borderRadius: 20, backgroundColor: "#1E293B" }, chipActive: { backgroundColor: "#38BDF8" }, chipText: { color: "#94A3B8", fontSize: 13 }, chipTextActive: { color: "#0F172A", fontWeight: "700" }, saveButton: { marginTop: 22, padding: 18, borderRadius: 12, alignItems: "center" }, incomeSave: { backgroundColor: "#22C55E" }, expenseSave: { backgroundColor: "#EF4444" }, disabledButton: { opacity: 0.6 }, saveButtonText: { color: "#0F172A", fontWeight: "800", fontSize: 17 }, detailsButton: { paddingVertical: 14, alignItems: "center" }, detailsButtonText: { color: "#38BDF8", fontSize: 12, fontWeight: "700" }
 });
