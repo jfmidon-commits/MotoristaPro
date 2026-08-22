@@ -152,6 +152,7 @@ describe("PreventiveMaintenanceService", () => {
         id: "event-1",
         user_id: "user-1",
         vehicle_id: "vehicle-1",
+        preventive_plan_id: null,
         description: "Troca de óleo — óleo sintético",
         cost: 25000,
         odometer_km: 50_000,
