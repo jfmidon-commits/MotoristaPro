@@ -16,6 +16,34 @@ function mapVehicleRow(row: VehicleRow): Vehicle {
   };
 }
 
+export function normalizeVehiclePlate(value?: string | null): string | null {
+  const normalized = (value ?? "").toUpperCase().replace(/[^A-Z0-9]/g, "");
+  return normalized || null;
+}
+
+async function assertPlateAvailable(params: {
+  userId: string;
+  plate: string | null;
+  excludeVehicleId?: string;
+}) {
+  if (!params.plate) return;
+  const db = await getDb();
+  const args: string[] = [params.userId, params.plate];
+  const excludeClause = params.excludeVehicleId ? " AND id != ?" : "";
+  if (params.excludeVehicleId) args.push(params.excludeVehicleId);
+
+  const duplicate = await db.getFirstAsync<{ id: string; name: string }>(
+    `SELECT id, name FROM vehicles
+     WHERE user_id = ?
+       AND UPPER(REPLACE(REPLACE(TRIM(COALESCE(plate, '')), '-', ''), ' ', '')) = ?${excludeClause}
+     LIMIT 1`,
+    args
+  );
+  if (duplicate) {
+    throw new Error(`A placa ${params.plate} já está cadastrada no veículo "${duplicate.name}".`);
+  }
+}
+
 /**
  * createVehicle() é EXCLUSIVO para veículos. Nunca deve ser usado como
  * atalho para gerar um id de veículo "placeholder" pra manutenção.
@@ -27,12 +55,16 @@ export async function createVehicle(params: {
   isDefault?: boolean;
 }): Promise<Vehicle> {
   const db = await getDb();
+  const name = params.name.trim();
+  if (!name) throw new Error("Informe o nome/modelo do veículo.");
+  const plate = normalizeVehiclePlate(params.plate);
+  await assertPlateAvailable({ userId: params.userId, plate });
 
   const vehicle: Vehicle = {
     id: uuidv4(),
     user_id: params.userId,
-    name: params.name,
-    plate: params.plate ?? null,
+    name,
+    plate,
     is_default: params.isDefault ?? false,
     created_at: new Date().toISOString(),
     sync_state: "pending",
@@ -83,11 +115,13 @@ export async function updateVehicle(params: {
 
   const name = params.name.trim();
   if (!name) throw new Error("Informe o nome/modelo do veículo.");
+  const plate = normalizeVehiclePlate(params.plate);
+  await assertPlateAvailable({ userId: params.userId, plate, excludeVehicleId: params.vehicleId });
 
   const updated: Vehicle = {
     ...current,
     name,
-    plate: params.plate?.trim() || null,
+    plate,
     sync_state: "pending",
     sync_error: null
   };
