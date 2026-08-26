@@ -80,13 +80,7 @@ export async function pullRemoteState(userId: string): Promise<PullSyncResult> {
     throw new Error("Sessão autenticada inválida para sincronização remota.");
   }
 
-  const [
-    vehiclesResult,
-    transactionsResult,
-    maintenanceResult,
-    workSessionsResult,
-    preventiveResult
-  ] = await Promise.all([
+  const [vehiclesResult, transactionsResult, maintenanceResult, workSessionsResult, preventiveResult] = await Promise.all([
     supabase.from("vehicles").select("*").eq("user_id", userId),
     supabase.from("transactions").select("*").eq("user_id", userId),
     supabase.from("maintenance_events").select("*").eq("user_id", userId),
@@ -94,12 +88,7 @@ export async function pullRemoteState(userId: string): Promise<PullSyncResult> {
     supabase.from("preventive_maintenance_plans").select("*").eq("user_id", userId)
   ]);
 
-  const firstError =
-    vehiclesResult.error ??
-    transactionsResult.error ??
-    maintenanceResult.error ??
-    workSessionsResult.error ??
-    preventiveResult.error;
+  const firstError = vehiclesResult.error ?? transactionsResult.error ?? maintenanceResult.error ?? workSessionsResult.error ?? preventiveResult.error;
   if (firstError) throw new Error(firstError.message);
 
   const remoteVehicles = (vehiclesResult.data ?? []) as RemoteVehicle[];
@@ -124,12 +113,13 @@ export async function pullRemoteState(userId: string): Promise<PullSyncResult> {
     );
     if (!(await shouldAcceptRemote(userId, "vehicles", remote.id, local?.sync_state))) continue;
     await db.runAsync(
-      `INSERT INTO vehicles (id, user_id, name, plate, is_default, created_at, sync_state, sync_error)
-       VALUES (?, ?, ?, ?, ?, ?, 'synced', NULL)
+      `INSERT INTO vehicles (id, user_id, name, plate, is_default, is_archived, created_at, sync_state, sync_error)
+       VALUES (?, ?, ?, ?, ?, ?, ?, 'synced', NULL)
        ON CONFLICT(id) DO UPDATE SET
          name = excluded.name, plate = excluded.plate, is_default = excluded.is_default,
-         created_at = excluded.created_at, sync_state = 'synced', sync_error = NULL`,
-      [remote.id, userId, remote.name, remote.plate, remote.is_default ? 1 : 0, remote.created_at]
+         is_archived = excluded.is_archived, created_at = excluded.created_at,
+         sync_state = 'synced', sync_error = NULL`,
+      [remote.id, userId, remote.name, remote.plate, remote.is_default ? 1 : 0, remote.is_archived ? 1 : 0, remote.created_at]
     );
     result.vehicles += 1;
   }
@@ -184,16 +174,7 @@ export async function pullRemoteState(userId: string): Promise<PullSyncResult> {
          vehicle_id = excluded.vehicle_id, started_at = excluded.started_at, ended_at = excluded.ended_at,
          start_odometer_km = excluded.start_odometer_km, end_odometer_km = excluded.end_odometer_km,
          created_at = excluded.created_at, sync_state = 'synced', sync_error = NULL`,
-      [
-        remote.id,
-        userId,
-        remote.vehicle_id,
-        remote.started_at,
-        remote.ended_at,
-        remote.start_odometer_km,
-        remote.end_odometer_km,
-        remote.created_at
-      ]
+      [remote.id, userId, remote.vehicle_id, remote.started_at, remote.ended_at, remote.start_odometer_km, remote.end_odometer_km, remote.created_at]
     );
     result.workSessions += 1;
   }
@@ -215,38 +196,17 @@ export async function pullRemoteState(userId: string): Promise<PullSyncResult> {
          warning_km = excluded.warning_km, warning_days = excluded.warning_days,
          is_active = excluded.is_active, created_at = excluded.created_at, updated_at = excluded.updated_at,
          sync_state = 'synced', sync_error = NULL`,
-      [
-        remote.id,
-        userId,
-        remote.vehicle_id,
-        remote.category,
-        remote.interval_km,
-        remote.interval_days,
-        remote.warning_km,
-        remote.warning_days,
-        remote.is_active ? 1 : 0,
-        remote.created_at,
-        remote.updated_at
-      ]
+      [remote.id, userId, remote.vehicle_id, remote.category, remote.interval_km, remote.interval_days,
+        remote.warning_km, remote.warning_days, remote.is_active ? 1 : 0, remote.created_at, remote.updated_at]
     );
     result.preventiveMaintenance += 1;
   }
 
-  result.removed += await reconcileRemoteDeletes(
-    userId, "transactions", new Set(remoteTransactions.map((item) => item.id))
-  );
-  result.removed += await reconcileRemoteDeletes(
-    userId, "maintenance_events", new Set(remoteMaintenance.map((item) => item.id))
-  );
-  result.removed += await reconcileRemoteDeletes(
-    userId, "work_sessions", new Set(remoteWorkSessions.map((item) => item.id))
-  );
-  result.removed += await reconcileRemoteDeletes(
-    userId, "preventive_maintenance_plans", new Set(remotePreventive.map((item) => item.id))
-  );
-  result.removed += await reconcileRemoteDeletes(
-    userId, "vehicles", new Set(remoteVehicles.map((item) => item.id))
-  );
+  result.removed += await reconcileRemoteDeletes(userId, "transactions", new Set(remoteTransactions.map((item) => item.id)));
+  result.removed += await reconcileRemoteDeletes(userId, "maintenance_events", new Set(remoteMaintenance.map((item) => item.id)));
+  result.removed += await reconcileRemoteDeletes(userId, "work_sessions", new Set(remoteWorkSessions.map((item) => item.id)));
+  result.removed += await reconcileRemoteDeletes(userId, "preventive_maintenance_plans", new Set(remotePreventive.map((item) => item.id)));
+  result.removed += await reconcileRemoteDeletes(userId, "vehicles", new Set(remoteVehicles.map((item) => item.id)));
 
   return result;
 }
