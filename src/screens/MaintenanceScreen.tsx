@@ -10,6 +10,7 @@ import {
   NoVehicleError,
   type MaintenanceCategory
 } from "@/services/MaintenanceService";
+import { evaluateOdometerConsistency, getLatestKnownOdometerForVehicle } from "@/services/OdometerService";
 import { getVehicles } from "@/services/VehicleService";
 import { formatBRLDigitsInput, formatCentsToBRL, parseBRLInputToCents } from "@/utils/formatters";
 import type { MaintenanceEvent, Vehicle } from "@/types";
@@ -23,6 +24,24 @@ function parseOdometer(value: string): number | undefined {
 
 function isKnownCategory(value: string | undefined): value is MaintenanceCategory {
   return !!value && (MAINTENANCE_CATEGORIES as readonly string[]).includes(value);
+}
+
+async function confirmOdometerReading(userId: string, vehicleId: string, enteredKm: number): Promise<boolean> {
+  const latestKnownKm = await getLatestKnownOdometerForVehicle(userId, vehicleId);
+  const consistency = evaluateOdometerConsistency(enteredKm, latestKnownKm);
+  if (!consistency.isLowerThanKnown || consistency.latestKnownKm == null) return true;
+
+  return new Promise((resolve) => {
+    Alert.alert(
+      "Quilometragem menor que o histórico",
+      `A maior leitura conhecida deste veículo é ${consistency.latestKnownKm.toLocaleString("pt-BR")} km. Você informou ${enteredKm.toLocaleString("pt-BR")} km.\n\nConfira o odômetro para não distorcer os alertas preventivos.`,
+      [
+        { text: "Revisar", style: "cancel", onPress: () => resolve(false) },
+        { text: "Continuar mesmo assim", onPress: () => resolve(true) }
+      ],
+      { cancelable: true, onDismiss: () => resolve(false) }
+    );
+  });
 }
 
 export default function MaintenanceScreen({ navigation, route }: any) {
@@ -60,11 +79,7 @@ export default function MaintenanceScreen({ navigation, route }: any) {
     setEvents(selected ? await getMaintenanceEvents(user.id, selected.id) : []);
   }, [requestedVehicleId, selectedVehicleId, user?.id]);
 
-  useFocusEffect(
-    useCallback(() => {
-      load();
-    }, [load])
-  );
+  useFocusEffect(useCallback(() => { load(); }, [load]));
 
   async function selectVehicle(vehicleId: string) {
     if (!user?.id) return;
@@ -91,6 +106,10 @@ export default function MaintenanceScreen({ navigation, route }: any) {
     const odometerKm = parseOdometer(odometer);
     if (odometerKm !== undefined && (!Number.isFinite(odometerKm) || odometerKm < 0)) {
       Alert.alert("Odômetro inválido");
+      return;
+    }
+
+    if (odometerKm !== undefined && !(await confirmOdometerReading(user.id, selectedVehicleId, odometerKm))) {
       return;
     }
 
@@ -147,11 +166,7 @@ export default function MaintenanceScreen({ navigation, route }: any) {
                 {vehicles.map((vehicle) => {
                   const selected = vehicle.id === selectedVehicleId;
                   return (
-                    <Pressable
-                      key={vehicle.id}
-                      style={[styles.vehicleChip, selected && styles.vehicleChipActive]}
-                      onPress={() => selectVehicle(vehicle.id)}
-                    >
+                    <Pressable key={vehicle.id} style={[styles.vehicleChip, selected && styles.vehicleChipActive]} onPress={() => selectVehicle(vehicle.id)}>
                       <Text style={[styles.vehicleChipText, selected && styles.vehicleChipTextActive]}>
                         {vehicle.name}{vehicle.is_default ? " ★" : ""}
                       </Text>
@@ -168,42 +183,18 @@ export default function MaintenanceScreen({ navigation, route }: any) {
             <Text style={styles.sectionTitle}>Categoria</Text>
             <View style={styles.categoryRow}>
               {MAINTENANCE_CATEGORIES.map((item) => (
-                <Pressable
-                  key={item}
-                  style={[styles.categoryChip, category === item && styles.categoryChipActive]}
-                  onPress={() => setCategory(item)}
-                >
+                <Pressable key={item} style={[styles.categoryChip, category === item && styles.categoryChipActive]} onPress={() => setCategory(item)}>
                   <Text style={[styles.categoryText, category === item && styles.categoryTextActive]}>{item}</Text>
                 </Pressable>
               ))}
             </View>
 
             <View style={styles.form}>
-              <TextInput
-                style={styles.input}
-                placeholder="Observação (opcional)"
-                placeholderTextColor="#64748B"
-                value={notes}
-                onChangeText={setNotes}
-              />
+              <TextInput style={styles.input} placeholder="Observação (opcional)" placeholderTextColor="#64748B" value={notes} onChangeText={setNotes} />
               <Text style={styles.inputLabel}>Custo (R$)</Text>
-              <TextInput
-                style={styles.input}
-                placeholder="0,00"
-                placeholderTextColor="#64748B"
-                keyboardType="number-pad"
-                value={cost}
-                onChangeText={(value) => setCost(formatBRLDigitsInput(value))}
-              />
+              <TextInput style={styles.input} placeholder="0,00" placeholderTextColor="#64748B" keyboardType="number-pad" value={cost} onChangeText={(value) => setCost(formatBRLDigitsInput(value))} />
               <Text style={styles.inputLabel}>Odômetro (opcional)</Text>
-              <TextInput
-                style={styles.input}
-                placeholder="Ex: 30020"
-                placeholderTextColor="#64748B"
-                keyboardType="number-pad"
-                value={odometer}
-                onChangeText={setOdometer}
-              />
+              <TextInput style={styles.input} placeholder="Ex: 30020" placeholderTextColor="#64748B" keyboardType="number-pad" value={odometer} onChangeText={setOdometer} />
               <Pressable style={[styles.addButton, saving && styles.disabledButton]} onPress={handleAdd} disabled={saving || !selectedVehicleId}>
                 <Text style={styles.addButtonText}>{saving ? "Salvando..." : "Registrar manutenção"}</Text>
               </Pressable>
