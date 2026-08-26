@@ -30,11 +30,12 @@ async function confirmOdometerReading(userId: string, vehicleId: string, entered
   const latestKnownKm = await getLatestKnownOdometerForVehicle(userId, vehicleId);
   const consistency = evaluateOdometerConsistency(enteredKm, latestKnownKm);
   if (!consistency.isLowerThanKnown || consistency.latestKnownKm == null) return true;
+  const knownKm = consistency.latestKnownKm;
 
   return new Promise((resolve) => {
     Alert.alert(
       "Quilometragem menor que o histórico",
-      `A maior leitura conhecida deste veículo é ${consistency.latestKnownKm.toLocaleString("pt-BR")} km. Você informou ${enteredKm.toLocaleString("pt-BR")} km.\n\nConfira o odômetro para não distorcer os alertas preventivos.`,
+      `A maior leitura conhecida deste veículo é ${knownKm.toLocaleString("pt-BR")} km. Você informou ${enteredKm.toLocaleString("pt-BR")} km.\n\nConfira o odômetro para não distorcer os alertas preventivos.`,
       [
         { text: "Revisar", style: "cancel", onPress: () => resolve(false) },
         { text: "Continuar mesmo assim", onPress: () => resolve(true) }
