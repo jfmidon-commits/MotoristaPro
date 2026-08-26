@@ -1,4 +1,4 @@
-import React, { useCallback, useState } from "react";
+import React, { useCallback, useRef, useState } from "react";
 import { Alert, FlatList, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useFocusEffect } from "@react-navigation/native";
@@ -58,7 +58,12 @@ function statusText(item: PreventiveMaintenanceOverview): string {
 
 function remainingText(item: PreventiveMaintenanceOverview): string {
   if (!item.plan.is_active) return "Plano pausado. Reative para voltar aos alertas.";
-  if (item.status === "unknown") return "Registre a primeira manutenção desta categoria.";
+  if (item.status === "unknown") {
+    if (item.lastEvent && item.lastEvent.odometer_km == null && item.plan.interval_km != null) {
+      return "Última manutenção encontrada, mas sem odômetro. Registre uma manutenção com km para iniciar o ciclo por quilometragem.";
+    }
+    return "Registre a primeira manutenção desta categoria para iniciar o acompanhamento.";
+  }
   const parts: string[] = [];
   if (item.remainingKm != null) {
     parts.push(item.remainingKm >= 0 ? `${item.remainingKm} km restantes` : `${Math.abs(item.remainingKm)} km vencidos`);
@@ -81,6 +86,7 @@ export default function PreventiveMaintenanceScreen({ navigation }: any) {
   const [warningKm, setWarningKm] = useState("1000");
   const [warningDays, setWarningDays] = useState("15");
   const [saving, setSaving] = useState(false);
+  const savingRef = useRef(false);
 
   const load = useCallback(async () => {
     if (!user?.id) return;
@@ -117,6 +123,7 @@ export default function PreventiveMaintenanceScreen({ navigation }: any) {
   }
 
   async function handleCreate() {
+    if (savingRef.current) return;
     if (!user?.id || !selectedVehicleId) {
       Alert.alert("Cadastre ou selecione um veículo primeiro.");
       return;
@@ -139,6 +146,7 @@ export default function PreventiveMaintenanceScreen({ navigation }: any) {
       return;
     }
 
+    savingRef.current = true;
     setSaving(true);
     try {
       await createPreventiveMaintenancePlan({
@@ -153,8 +161,9 @@ export default function PreventiveMaintenanceScreen({ navigation }: any) {
       if (category === "Outros") setCustomCategory("");
       await selectVehicle(selectedVehicleId);
     } catch (error) {
-      Alert.alert("Erro", (error as Error)?.message ?? "Não foi possível criar o plano.");
+      Alert.alert("Não foi possível criar o plano", (error as Error)?.message ?? "Erro desconhecido.");
     } finally {
+      savingRef.current = false;
       setSaving(false);
     }
   }
@@ -189,7 +198,7 @@ export default function PreventiveMaintenanceScreen({ navigation }: any) {
         ListHeaderComponent={
           <View>
             <Text style={styles.title}>Manutenção preventiva</Text>
-            <Text style={styles.subtitle}>Acompanhe por km e/ou tempo sem inventar quilometragem.</Text>
+            <Text style={styles.subtitle}>Defina quando repetir o serviço e com quanta antecedência quer receber o aviso.</Text>
 
             <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.chips}>
               {vehicles.map((vehicle) => (
@@ -233,13 +242,26 @@ export default function PreventiveMaintenanceScreen({ navigation }: any) {
               />
             )}
             <View style={styles.formGrid}>
-              <TextInput style={styles.halfInput} keyboardType="number-pad" value={intervalKm} onChangeText={setIntervalKm} placeholder="Intervalo km" placeholderTextColor="#64748B" />
-              <TextInput style={styles.halfInput} keyboardType="number-pad" value={intervalDays} onChangeText={setIntervalDays} placeholder="Intervalo dias" placeholderTextColor="#64748B" />
-              <TextInput style={styles.halfInput} keyboardType="number-pad" value={warningKm} onChangeText={setWarningKm} placeholder="Avisar antes km" placeholderTextColor="#64748B" />
-              <TextInput style={styles.halfInput} keyboardType="number-pad" value={warningDays} onChangeText={setWarningDays} placeholder="Avisar antes dias" placeholderTextColor="#64748B" />
+              <View style={styles.field}>
+                <Text style={styles.fieldLabel}>Intervalo (km)</Text>
+                <TextInput style={styles.halfInput} keyboardType="number-pad" value={intervalKm} onChangeText={setIntervalKm} placeholder="Ex: 10000" placeholderTextColor="#64748B" />
+              </View>
+              <View style={styles.field}>
+                <Text style={styles.fieldLabel}>Intervalo (dias)</Text>
+                <TextInput style={styles.halfInput} keyboardType="number-pad" value={intervalDays} onChangeText={setIntervalDays} placeholder="Ex: 180" placeholderTextColor="#64748B" />
+              </View>
+              <View style={styles.field}>
+                <Text style={styles.fieldLabel}>Avisar antes (km)</Text>
+                <TextInput style={styles.halfInput} keyboardType="number-pad" value={warningKm} onChangeText={setWarningKm} placeholder="Ex: 1000" placeholderTextColor="#64748B" />
+              </View>
+              <View style={styles.field}>
+                <Text style={styles.fieldLabel}>Avisar antes (dias)</Text>
+                <TextInput style={styles.halfInput} keyboardType="number-pad" value={warningDays} onChangeText={setWarningDays} placeholder="Ex: 15" placeholderTextColor="#64748B" />
+              </View>
             </View>
-            <Pressable style={styles.createButton} onPress={handleCreate} disabled={saving || !selectedVehicleId}>
-              <Text style={styles.createButtonText}>{saving ? "Salvando..." : "Criar plano"}</Text>
+            <Text style={styles.formHelp}>Exemplo: 10.000 km / 180 dias, avisando 1.000 km / 15 dias antes.</Text>
+            <Pressable style={[styles.createButton, saving && styles.disabledButton]} onPress={handleCreate} disabled={saving || !selectedVehicleId}>
+              <Text style={styles.createButtonText}>{saving ? "Criando..." : "Criar plano"}</Text>
             </Pressable>
 
             <Text style={styles.section}>Acompanhamento</Text>
@@ -269,7 +291,7 @@ export default function PreventiveMaintenanceScreen({ navigation }: any) {
             {item.lastEvent && (
               <Text style={styles.meta}>
                 Última: {new Date(item.lastEvent.performed_at).toLocaleDateString("pt-BR")}
-                {item.lastEvent.odometer_km != null ? ` • ${item.lastEvent.odometer_km} km` : ""}
+                {item.lastEvent.odometer_km != null ? ` • ${item.lastEvent.odometer_km} km` : " • sem odômetro"}
               </Text>
             )}
             <View style={styles.actions}>
@@ -297,7 +319,7 @@ const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: "#0F172A" },
   content: { padding: 20, paddingBottom: 40 },
   title: { color: "#fff", fontSize: 24, fontWeight: "800" },
-  subtitle: { color: "#94A3B8", marginTop: 4, marginBottom: 16 },
+  subtitle: { color: "#94A3B8", marginTop: 4, marginBottom: 16, lineHeight: 19 },
   chips: { gap: 8, paddingBottom: 8 },
   vehicleChip: { backgroundColor: "#1E293B", borderRadius: 999, paddingVertical: 9, paddingHorizontal: 14 },
   vehicleChipActive: { backgroundColor: "#38BDF8" },
@@ -311,8 +333,12 @@ const styles = StyleSheet.create({
   categoryTextActive: { color: "#0F172A" },
   input: { backgroundColor: "#1E293B", color: "#fff", padding: 13, borderRadius: 10, marginBottom: 10 },
   formGrid: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
-  halfInput: { width: "48%", backgroundColor: "#1E293B", color: "#fff", padding: 13, borderRadius: 10 },
+  field: { width: "48%", gap: 5 },
+  fieldLabel: { color: "#94A3B8", fontSize: 11, fontWeight: "700" },
+  halfInput: { width: "100%", backgroundColor: "#1E293B", color: "#fff", padding: 13, borderRadius: 10 },
+  formHelp: { color: "#64748B", fontSize: 11, lineHeight: 16, marginTop: 8 },
   createButton: { backgroundColor: "#38BDF8", padding: 14, borderRadius: 10, alignItems: "center", marginTop: 10 },
+  disabledButton: { opacity: 0.55 },
   createButtonText: { color: "#0F172A", fontWeight: "800" },
   emptyCard: { backgroundColor: "#422006", borderRadius: 10, padding: 14 },
   emptyText: { color: "#94A3B8", textAlign: "center", marginVertical: 14 },
@@ -324,7 +350,7 @@ const styles = StyleSheet.create({
   planTitle: { color: "#fff", fontSize: 16, fontWeight: "800" },
   planStatus: { color: "#CBD5E1", fontSize: 12, fontWeight: "800", marginTop: 2 },
   sync: { color: "#64748B" },
-  remaining: { color: "#E2E8F0", marginTop: 10, fontWeight: "600" },
+  remaining: { color: "#E2E8F0", marginTop: 10, fontWeight: "600", lineHeight: 18 },
   meta: { color: "#94A3B8", fontSize: 12, marginTop: 5 },
   actions: { flexDirection: "row", flexWrap: "wrap", gap: 8, marginTop: 12 },
   primaryAction: { backgroundColor: "#F97316", borderRadius: 8, paddingVertical: 9, paddingHorizontal: 12 },
