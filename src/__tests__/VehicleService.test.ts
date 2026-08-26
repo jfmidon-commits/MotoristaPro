@@ -11,6 +11,7 @@ import { getDb } from "@/lib/database";
 import { supabase } from "@/lib/supabase";
 import {
   getVehicleById,
+  normalizeVehiclePlate,
   setDefaultVehicle,
   updateVehicle
 } from "@/services/VehicleService";
@@ -43,6 +44,12 @@ describe("VehicleService", () => {
     mockedGetSession.mockResolvedValue({ data: { session: null }, error: null } as never);
   });
 
+  it("normaliza placa removendo pontuação, espaço e diferença de caixa", () => {
+    expect(normalizeVehiclePlate(" abc-1d23 ")).toBe("ABC1D23");
+    expect(normalizeVehiclePlate("ABC 1D23")).toBe("ABC1D23");
+    expect(normalizeVehiclePlate("   ")).toBeNull();
+  });
+
   it("busca veículo sempre filtrando pelo usuário e id", async () => {
     const db = createDbMock();
     db.getFirstAsync.mockResolvedValue(vehicleRow);
@@ -59,14 +66,16 @@ describe("VehicleService", () => {
 
   it("edita nome e placa localmente como pending antes do sync", async () => {
     const db = createDbMock();
-    db.getFirstAsync.mockResolvedValue(vehicleRow);
+    db.getFirstAsync
+      .mockResolvedValueOnce(vehicleRow)
+      .mockResolvedValueOnce(null);
     mockedGetDb.mockResolvedValue(db as never);
 
     const result = await updateVehicle({
       userId: "user-1",
       vehicleId: "vehicle-1",
       name: " Onix Plus ",
-      plate: " XYZ9A99 "
+      plate: " xyz-9a99 "
     });
 
     expect(result).toMatchObject({
@@ -79,6 +88,23 @@ describe("VehicleService", () => {
       expect.stringContaining("WHERE id = ? AND user_id = ?"),
       ["Onix Plus", "XYZ9A99", "vehicle-1", "user-1"]
     );
+  });
+
+  it("rejeita placa já cadastrada em outro veículo do usuário", async () => {
+    const db = createDbMock();
+    db.getFirstAsync
+      .mockResolvedValueOnce(vehicleRow)
+      .mockResolvedValueOnce({ id: "vehicle-2", name: "Sentra" });
+    mockedGetDb.mockResolvedValue(db as never);
+
+    await expect(
+      updateVehicle({
+        userId: "user-1",
+        vehicleId: "vehicle-1",
+        name: "Onix",
+        plate: "abc-1d23"
+      })
+    ).rejects.toThrow("já está cadastrada");
   });
 
   it("rejeita edição de veículo que não pertence ao usuário", async () => {
