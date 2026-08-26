@@ -1,4 +1,4 @@
-import React, { useCallback, useState } from "react";
+import React, { useCallback, useRef, useState } from "react";
 import { Alert, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useFocusEffect } from "@react-navigation/native";
@@ -11,16 +11,8 @@ import type { Vehicle } from "@/types";
 
 const INCOME_CATEGORIES = ["Corrida", "Gorjeta", "Bônus", "Promoções", "Outros"];
 const EXPENSE_CATEGORIES = [
-  "Combustível",
-  "Pedágio",
-  "Estacionamento",
-  "Lavagem",
-  "Manutenção",
-  "Alimentação",
-  "Multa",
-  "Seguro",
-  "Financiamento/locação",
-  "Outros"
+  "Combustível", "Pedágio", "Estacionamento", "Lavagem", "Manutenção",
+  "Alimentação", "Multa", "Seguro", "Financiamento/locação", "Outros"
 ];
 
 export default function AddTransactionScreen({ route, navigation }: any) {
@@ -36,6 +28,7 @@ export default function AddTransactionScreen({ route, navigation }: any) {
   const [selectedVehicleId, setSelectedVehicleId] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [loadedEdit, setLoadedEdit] = useState(false);
+  const savingRef = useRef(false);
 
   const categories = type === "income" ? INCOME_CATEGORIES : EXPENSE_CATEGORIES;
 
@@ -75,14 +68,10 @@ export default function AddTransactionScreen({ route, navigation }: any) {
     }
   }, [categories, loadedEdit, transactionId, user?.id]);
 
-  useFocusEffect(
-    useCallback(() => {
-      load();
-    }, [load])
-  );
+  useFocusEffect(useCallback(() => { load(); }, [load]));
 
   async function handleSave() {
-    if (!user?.id) return;
+    if (savingRef.current || !user?.id) return;
     const amountInCents = parseBRLInputToCents(amount);
     if (amountInCents <= 0) {
       Alert.alert("Informe um valor válido");
@@ -91,6 +80,7 @@ export default function AddTransactionScreen({ route, navigation }: any) {
 
     const finalCategory = category === "Outros" ? customCategory.trim() || "Outros" : category;
 
+    savingRef.current = true;
     setSaving(true);
     try {
       if (transactionId) {
@@ -116,6 +106,7 @@ export default function AddTransactionScreen({ route, navigation }: any) {
     } catch (err: any) {
       Alert.alert("Erro ao salvar", err?.message ?? "Erro desconhecido");
     } finally {
+      savingRef.current = false;
       setSaving(false);
     }
   }
@@ -142,41 +133,24 @@ export default function AddTransactionScreen({ route, navigation }: any) {
         <Text style={styles.label}>Categoria</Text>
         <View style={styles.chipRow}>
           {categories.map((item) => (
-            <Pressable
-              key={item}
-              style={[styles.chip, category === item && styles.chipActive]}
-              onPress={() => setCategory(item)}
-            >
+            <Pressable key={item} style={[styles.chip, category === item && styles.chipActive]} onPress={() => setCategory(item)}>
               <Text style={[styles.chipText, category === item && styles.chipTextActive]}>{item}</Text>
             </Pressable>
           ))}
         </View>
 
         {category === "Outros" ? (
-          <TextInput
-            style={[styles.input, styles.extraInput]}
-            placeholder="Nome da categoria"
-            placeholderTextColor="#64748B"
-            value={customCategory}
-            onChangeText={setCustomCategory}
-          />
+          <TextInput style={[styles.input, styles.extraInput]} placeholder="Nome da categoria" placeholderTextColor="#64748B" value={customCategory} onChangeText={setCustomCategory} />
         ) : null}
 
         <Text style={styles.label}>Veículo</Text>
         <Text style={styles.helper}>Durante um turno, o veículo do turno é selecionado automaticamente.</Text>
         <View style={styles.chipRow}>
-          <Pressable
-            style={[styles.chip, selectedVehicleId === null && styles.chipActive]}
-            onPress={() => setSelectedVehicleId(null)}
-          >
+          <Pressable style={[styles.chip, selectedVehicleId === null && styles.chipActive]} onPress={() => setSelectedVehicleId(null)}>
             <Text style={[styles.chipText, selectedVehicleId === null && styles.chipTextActive]}>Geral</Text>
           </Pressable>
           {vehicles.map((vehicle) => (
-            <Pressable
-              key={vehicle.id}
-              style={[styles.chip, selectedVehicleId === vehicle.id && styles.chipActive]}
-              onPress={() => setSelectedVehicleId(vehicle.id)}
-            >
+            <Pressable key={vehicle.id} style={[styles.chip, selectedVehicleId === vehicle.id && styles.chipActive]} onPress={() => setSelectedVehicleId(vehicle.id)}>
               <Text style={[styles.chipText, selectedVehicleId === vehicle.id && styles.chipTextActive]}>
                 {vehicle.name}{vehicle.is_default ? " ★" : ""}
               </Text>
@@ -194,13 +168,11 @@ export default function AddTransactionScreen({ route, navigation }: any) {
         />
 
         <Pressable
-          style={[styles.saveButton, { backgroundColor: type === "income" ? "#22C55E" : "#EF4444" }]}
+          style={[styles.saveButton, { backgroundColor: type === "income" ? "#22C55E" : "#EF4444" }, saving && styles.disabledButton]}
           onPress={handleSave}
           disabled={saving}
         >
-          <Text style={styles.saveButtonText}>
-            {saving ? "Salvando..." : isEditing ? "Salvar alterações" : "Salvar lançamento"}
-          </Text>
+          <Text style={styles.saveButtonText}>{saving ? "Salvando..." : isEditing ? "Salvar alterações" : "Salvar lançamento"}</Text>
         </Pressable>
       </ScrollView>
     </SafeAreaView>
@@ -217,15 +189,11 @@ const styles = StyleSheet.create({
   amountInput: { fontSize: 24, fontWeight: "700", textAlign: "right" },
   extraInput: { marginTop: 10 },
   chipRow: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
-  chip: {
-    paddingVertical: 8,
-    paddingHorizontal: 14,
-    borderRadius: 20,
-    backgroundColor: "#1E293B"
-  },
+  chip: { paddingVertical: 8, paddingHorizontal: 14, borderRadius: 20, backgroundColor: "#1E293B" },
   chipActive: { backgroundColor: "#38BDF8" },
   chipText: { color: "#94A3B8", fontSize: 13 },
   chipTextActive: { color: "#0F172A", fontWeight: "700" },
   saveButton: { marginTop: 32, padding: 16, borderRadius: 10, alignItems: "center" },
+  disabledButton: { opacity: 0.55 },
   saveButtonText: { color: "#0F172A", fontWeight: "700", fontSize: 16 }
 });
