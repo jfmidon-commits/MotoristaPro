@@ -2,7 +2,7 @@ import * as SQLite from "expo-sqlite";
 
 let dbInstance: SQLite.SQLiteDatabase | null = null;
 
-const LATEST_DB_VERSION = 4;
+const LATEST_DB_VERSION = 5;
 
 export async function getDb(): Promise<SQLite.SQLiteDatabase> {
   if (dbInstance) return dbInstance;
@@ -37,6 +37,7 @@ async function migrate(db: SQLite.SQLiteDatabase) {
       name TEXT NOT NULL,
       plate TEXT,
       is_default INTEGER NOT NULL DEFAULT 0 CHECK (is_default IN (0, 1)),
+      is_archived INTEGER NOT NULL DEFAULT 0 CHECK (is_archived IN (0, 1)),
       created_at TEXT NOT NULL,
       sync_state TEXT NOT NULL DEFAULT 'pending',
       sync_error TEXT
@@ -129,6 +130,10 @@ async function migrate(db: SQLite.SQLiteDatabase) {
     await db.execAsync(`ALTER TABLE maintenance_events ADD COLUMN preventive_plan_id TEXT REFERENCES preventive_maintenance_plans(id);`);
   }
 
+  if (!(await hasColumn(db, "vehicles", "is_archived"))) {
+    await db.execAsync(`ALTER TABLE vehicles ADD COLUMN is_archived INTEGER NOT NULL DEFAULT 0 CHECK (is_archived IN (0, 1));`);
+  }
+
   await db.execAsync(`
     UPDATE work_sessions
     SET sync_state = 'pending'
@@ -144,6 +149,7 @@ async function migrate(db: SQLite.SQLiteDatabase) {
     CREATE INDEX IF NOT EXISTS idx_work_sessions_user_started ON work_sessions(user_id, started_at);
     CREATE INDEX IF NOT EXISTS idx_work_sessions_user ON work_sessions(user_id);
     CREATE INDEX IF NOT EXISTS idx_vehicles_user ON vehicles(user_id);
+    CREATE INDEX IF NOT EXISTS idx_vehicles_user_archived ON vehicles(user_id, is_archived);
     CREATE INDEX IF NOT EXISTS idx_preventive_plans_user ON preventive_maintenance_plans(user_id);
     CREATE INDEX IF NOT EXISTS idx_preventive_plans_vehicle ON preventive_maintenance_plans(vehicle_id);
     CREATE INDEX IF NOT EXISTS idx_preventive_plans_user_vehicle ON preventive_maintenance_plans(user_id, vehicle_id);
