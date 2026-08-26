@@ -24,6 +24,7 @@ export interface Vehicle {
   name: string;
   plate: string | null;
   is_default: boolean;
+  is_archived: boolean;
   created_at: string;
   sync_state: SyncState;
   sync_error: string | null;
