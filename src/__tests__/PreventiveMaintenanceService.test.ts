@@ -104,7 +104,7 @@ describe("PreventiveMaintenanceService", () => {
         category: " troca de óleo ",
         intervalKm: 10_000
       })
-    ).rejects.toThrow("Já existe um plano de Troca de óleo");
+    ).rejects.toThrow("Já existe um plano de troca de óleo");
     expect(db.runAsync).not.toHaveBeenCalledWith(
       expect.stringContaining("INSERT INTO preventive_maintenance_plans"),
       expect.anything()
