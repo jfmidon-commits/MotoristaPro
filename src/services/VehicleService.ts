@@ -153,6 +153,16 @@ export async function archiveVehicle(userId: string, vehicleId: string): Promise
   if (!current) throw new Error("Veículo não encontrado.");
   if (current.is_archived) return;
 
+  const activeSession = await db.getFirstAsync<{ id: string }>(
+    `SELECT id FROM work_sessions
+     WHERE user_id = ? AND vehicle_id = ? AND ended_at IS NULL
+     LIMIT 1`,
+    [userId, vehicleId]
+  );
+  if (activeSession) {
+    throw new Error("Encerre o turno ativo deste veículo antes de arquivá-lo.");
+  }
+
   await db.runAsync(
     `UPDATE vehicles
      SET is_archived = 1, is_default = 0, sync_state = 'pending', sync_error = NULL
