@@ -111,7 +111,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   };
 
   const signOut = async () => {
-    const { error } = await supabase.auth.signOut();
+    // Logout precisa funcionar sem internet. O escopo local remove a sessão persistida
+    // sem depender de uma chamada ao servidor; a sessão remota expira/revoga depois.
+    const { error } = await supabase.auth.signOut({ scope: "local" });
+    setSession(null);
     if (error) throw error;
   };
 

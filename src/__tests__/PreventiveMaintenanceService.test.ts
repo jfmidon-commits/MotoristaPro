@@ -55,30 +55,23 @@ describe("PreventiveMaintenanceService", () => {
 
   it("rejeita plano sem intervalo", async () => {
     await expect(
-      createPreventiveMaintenancePlan({
-        userId: "user-1",
-        vehicleId: "vehicle-1",
-        category: "Troca de óleo"
-      })
+      createPreventiveMaintenancePlan({ userId: "user-1", vehicleId: "vehicle-1", category: "Troca de óleo" })
     ).rejects.toThrow("Informe um intervalo em km ou dias");
     expect(mockedGetDb).not.toHaveBeenCalled();
   });
 
   it("rejeita intervalKm zero com mensagem correta", async () => {
     await expect(
-      createPreventiveMaintenancePlan({
-        userId: "user-1",
-        vehicleId: "vehicle-1",
-        category: "Troca de óleo",
-        intervalKm: 0
-      })
+      createPreventiveMaintenancePlan({ userId: "user-1", vehicleId: "vehicle-1", category: "Troca de óleo", intervalKm: 0 })
     ).rejects.toThrow("Intervalo em km deve ser maior que zero");
     expect(mockedGetDb).not.toHaveBeenCalled();
   });
 
   it("permite warning zero e cria o plano local como pending", async () => {
     const db = createDbMock();
-    db.getFirstAsync.mockResolvedValue({ id: "vehicle-1" });
+    db.getFirstAsync
+      .mockResolvedValueOnce({ id: "vehicle-1" })
+      .mockResolvedValueOnce(null);
     mockedGetDb.mockResolvedValue(db as never);
 
     const plan = await createPreventiveMaintenancePlan({
@@ -94,6 +87,27 @@ describe("PreventiveMaintenanceService", () => {
     expect(db.runAsync).toHaveBeenCalledWith(
       expect.stringContaining("INSERT INTO preventive_maintenance_plans"),
       expect.arrayContaining(["plan-test-id", "user-1", "vehicle-1", "Troca de óleo", 10_000, 0])
+    );
+  });
+
+  it("rejeita plano duplicado para o mesmo veículo e categoria", async () => {
+    const db = createDbMock();
+    db.getFirstAsync
+      .mockResolvedValueOnce({ id: "vehicle-1" })
+      .mockResolvedValueOnce(basePlanRow);
+    mockedGetDb.mockResolvedValue(db as never);
+
+    await expect(
+      createPreventiveMaintenancePlan({
+        userId: "user-1",
+        vehicleId: "vehicle-1",
+        category: " troca de óleo ",
+        intervalKm: 10_000
+      })
+    ).rejects.toThrow("Já existe um plano de troca de óleo");
+    expect(db.runAsync).not.toHaveBeenCalledWith(
+      expect.stringContaining("INSERT INTO preventive_maintenance_plans"),
+      expect.anything()
     );
   });
 
@@ -132,9 +146,7 @@ describe("PreventiveMaintenanceService", () => {
     mockedGetMaintenanceEvents.mockResolvedValue([]);
 
     const result = await getPreventiveMaintenanceOverviewForVehicle(
-      "user-1",
-      "vehicle-1",
-      new Date("2026-08-21T00:00:00.000Z")
+      "user-1", "vehicle-1", new Date("2026-08-21T00:00:00.000Z")
     );
 
     expect(result).toHaveLength(1);
@@ -164,9 +176,7 @@ describe("PreventiveMaintenanceService", () => {
     ]);
 
     const result = await getPreventiveMaintenanceOverviewForVehicle(
-      "user-1",
-      "vehicle-1",
-      new Date("2026-08-21T00:00:00.000Z")
+      "user-1", "vehicle-1", new Date("2026-08-21T00:00:00.000Z")
     );
 
     expect(result[0].remainingKm).toBe(1_000);

@@ -1,4 +1,4 @@
-import React, { useCallback, useState } from "react";
+import React, { useCallback, useRef, useState } from "react";
 import { View, Text, TextInput, Pressable, FlatList, StyleSheet, Alert, ScrollView } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useFocusEffect } from "@react-navigation/native";
@@ -10,8 +10,9 @@ import {
   NoVehicleError,
   type MaintenanceCategory
 } from "@/services/MaintenanceService";
+import { evaluateOdometerConsistency, getLatestKnownOdometerForVehicle } from "@/services/OdometerService";
 import { getVehicles } from "@/services/VehicleService";
-import { formatCentsToBRL, parseBRLInputToCents } from "@/utils/formatters";
+import { formatBRLDigitsInput, formatCentsToBRL, parseBRLInputToCents } from "@/utils/formatters";
 import type { MaintenanceEvent, Vehicle } from "@/types";
 
 function parseOdometer(value: string): number | undefined {
@@ -23,6 +24,25 @@ function parseOdometer(value: string): number | undefined {
 
 function isKnownCategory(value: string | undefined): value is MaintenanceCategory {
   return !!value && (MAINTENANCE_CATEGORIES as readonly string[]).includes(value);
+}
+
+async function confirmOdometerReading(userId: string, vehicleId: string, enteredKm: number): Promise<boolean> {
+  const latestKnownKm = await getLatestKnownOdometerForVehicle(userId, vehicleId);
+  const consistency = evaluateOdometerConsistency(enteredKm, latestKnownKm);
+  if (!consistency.isLowerThanKnown || consistency.latestKnownKm == null) return true;
+  const knownKm = consistency.latestKnownKm;
+
+  return new Promise((resolve) => {
+    Alert.alert(
+      "Quilometragem menor que o histórico",
+      `A maior leitura conhecida deste veículo é ${knownKm.toLocaleString("pt-BR")} km. Você informou ${enteredKm.toLocaleString("pt-BR")} km.\n\nConfira o odômetro para não distorcer os alertas preventivos.`,
+      [
+        { text: "Revisar", style: "cancel", onPress: () => resolve(false) },
+        { text: "Continuar mesmo assim", onPress: () => resolve(true) }
+      ],
+      { cancelable: true, onDismiss: () => resolve(false) }
+    );
+  });
 }
 
 export default function MaintenanceScreen({ navigation, route }: any) {
@@ -42,6 +62,7 @@ export default function MaintenanceScreen({ navigation, route }: any) {
   const [cost, setCost] = useState("");
   const [odometer, setOdometer] = useState("");
   const [saving, setSaving] = useState(false);
+  const savingRef = useRef(false);
 
   const load = useCallback(async () => {
     if (!user?.id) return;
@@ -59,11 +80,7 @@ export default function MaintenanceScreen({ navigation, route }: any) {
     setEvents(selected ? await getMaintenanceEvents(user.id, selected.id) : []);
   }, [requestedVehicleId, selectedVehicleId, user?.id]);
 
-  useFocusEffect(
-    useCallback(() => {
-      load();
-    }, [load])
-  );
+  useFocusEffect(useCallback(() => { load(); }, [load]));
 
   async function selectVehicle(vehicleId: string) {
     if (!user?.id) return;
@@ -72,6 +89,7 @@ export default function MaintenanceScreen({ navigation, route }: any) {
   }
 
   async function handleAdd() {
+    if (savingRef.current) return;
     if (!user?.id || !selectedVehicleId) {
       Alert.alert("Nenhum veículo cadastrado", "Cadastre um veículo antes de lançar manutenção.", [
         { text: "Cadastrar veículo", onPress: () => navigation.navigate("Vehicles") },
@@ -92,8 +110,13 @@ export default function MaintenanceScreen({ navigation, route }: any) {
       return;
     }
 
+    if (odometerKm !== undefined && !(await confirmOdometerReading(user.id, selectedVehicleId, odometerKm))) {
+      return;
+    }
+
     const description = notes.trim() ? `${category} — ${notes.trim()}` : category;
 
+    savingRef.current = true;
     setSaving(true);
     try {
       await addMaintenanceEvent({
@@ -118,6 +141,7 @@ export default function MaintenanceScreen({ navigation, route }: any) {
         Alert.alert("Erro", (err as Error)?.message ?? "Erro desconhecido");
       }
     } finally {
+      savingRef.current = false;
       setSaving(false);
     }
   }
@@ -143,11 +167,7 @@ export default function MaintenanceScreen({ navigation, route }: any) {
                 {vehicles.map((vehicle) => {
                   const selected = vehicle.id === selectedVehicleId;
                   return (
-                    <Pressable
-                      key={vehicle.id}
-                      style={[styles.vehicleChip, selected && styles.vehicleChipActive]}
-                      onPress={() => selectVehicle(vehicle.id)}
-                    >
+                    <Pressable key={vehicle.id} style={[styles.vehicleChip, selected && styles.vehicleChipActive]} onPress={() => selectVehicle(vehicle.id)}>
                       <Text style={[styles.vehicleChipText, selected && styles.vehicleChipTextActive]}>
                         {vehicle.name}{vehicle.is_default ? " ★" : ""}
                       </Text>
@@ -164,41 +184,19 @@ export default function MaintenanceScreen({ navigation, route }: any) {
             <Text style={styles.sectionTitle}>Categoria</Text>
             <View style={styles.categoryRow}>
               {MAINTENANCE_CATEGORIES.map((item) => (
-                <Pressable
-                  key={item}
-                  style={[styles.categoryChip, category === item && styles.categoryChipActive]}
-                  onPress={() => setCategory(item)}
-                >
+                <Pressable key={item} style={[styles.categoryChip, category === item && styles.categoryChipActive]} onPress={() => setCategory(item)}>
                   <Text style={[styles.categoryText, category === item && styles.categoryTextActive]}>{item}</Text>
                 </Pressable>
               ))}
             </View>
 
             <View style={styles.form}>
-              <TextInput
-                style={styles.input}
-                placeholder="Observação (opcional)"
-                placeholderTextColor="#64748B"
-                value={notes}
-                onChangeText={setNotes}
-              />
-              <TextInput
-                style={styles.input}
-                placeholder="Custo (R$)"
-                placeholderTextColor="#64748B"
-                keyboardType="decimal-pad"
-                value={cost}
-                onChangeText={setCost}
-              />
-              <TextInput
-                style={styles.input}
-                placeholder="Odômetro (opcional)"
-                placeholderTextColor="#64748B"
-                keyboardType="number-pad"
-                value={odometer}
-                onChangeText={setOdometer}
-              />
-              <Pressable style={styles.addButton} onPress={handleAdd} disabled={saving || !selectedVehicleId}>
+              <TextInput style={styles.input} placeholder="Observação (opcional)" placeholderTextColor="#64748B" value={notes} onChangeText={setNotes} />
+              <Text style={styles.inputLabel}>Custo (R$)</Text>
+              <TextInput style={styles.input} placeholder="0,00" placeholderTextColor="#64748B" keyboardType="number-pad" value={cost} onChangeText={(value) => setCost(formatBRLDigitsInput(value))} />
+              <Text style={styles.inputLabel}>Odômetro (opcional)</Text>
+              <TextInput style={styles.input} placeholder="Ex: 30020" placeholderTextColor="#64748B" keyboardType="number-pad" value={odometer} onChangeText={setOdometer} />
+              <Pressable style={[styles.addButton, saving && styles.disabledButton]} onPress={handleAdd} disabled={saving || !selectedVehicleId}>
                 <Text style={styles.addButtonText}>{saving ? "Salvando..." : "Registrar manutenção"}</Text>
               </Pressable>
             </View>
@@ -251,9 +249,11 @@ const styles = StyleSheet.create({
   categoryChipActive: { backgroundColor: "#F97316" },
   categoryText: { color: "#94A3B8", fontSize: 12, fontWeight: "700" },
   categoryTextActive: { color: "#0F172A" },
-  form: { gap: 10, marginBottom: 18 },
+  form: { gap: 8, marginBottom: 18 },
+  inputLabel: { color: "#94A3B8", fontSize: 12, fontWeight: "700", marginTop: 2 },
   input: { backgroundColor: "#1E293B", color: "#fff", padding: 14, borderRadius: 10, fontSize: 15 },
   addButton: { backgroundColor: "#F97316", padding: 14, borderRadius: 10, alignItems: "center" },
+  disabledButton: { opacity: 0.55 },
   addButtonText: { color: "#0F172A", fontWeight: "800" },
   historyHeader: { flexDirection: "row", justifyContent: "space-between", alignItems: "flex-end", marginBottom: 8 },
   historySubtitle: { color: "#64748B", fontSize: 12, marginTop: -6 },

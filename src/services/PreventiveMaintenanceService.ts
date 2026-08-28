@@ -40,9 +40,36 @@ function validateIntervals(params: {
 }
 
 function normalizeCategory(category: string): string {
-  const value = category.trim();
+  const value = category.trim().replace(/\s+/g, " ");
   if (!value) throw new Error("Categoria do plano é obrigatória.");
   return value;
+}
+
+async function findDuplicatePlan(params: {
+  userId: string;
+  vehicleId: string;
+  category: string;
+  excludePlanId?: string;
+}): Promise<PreventiveMaintenancePlan | null> {
+  const db = await getDb();
+  const args: string[] = [params.userId, params.vehicleId, params.category];
+  const excludeClause = params.excludePlanId ? " AND p.id != ?" : "";
+  if (params.excludePlanId) args.push(params.excludePlanId);
+
+  const row = await db.getFirstAsync<PreventivePlanRow>(
+    `SELECT p.* FROM preventive_maintenance_plans p
+     WHERE p.user_id = ? AND p.vehicle_id = ?
+       AND LOWER(TRIM(p.category)) = LOWER(TRIM(?))${excludeClause}
+       AND NOT EXISTS (
+         SELECT 1 FROM pending_deletes pd
+         WHERE pd.user_id = p.user_id
+           AND pd.table_name = 'preventive_maintenance_plans'
+           AND pd.record_id = p.id
+       )
+     LIMIT 1`,
+    args
+  );
+  return row ? mapPlanRow(row) : null;
 }
 
 export async function createPreventiveMaintenancePlan(params: {
@@ -62,6 +89,19 @@ export async function createPreventiveMaintenancePlan(params: {
     [params.vehicleId, params.userId]
   );
   if (!vehicle) throw new Error("Veículo não encontrado para este usuário.");
+
+  const duplicate = await findDuplicatePlan({
+    userId: params.userId,
+    vehicleId: params.vehicleId,
+    category
+  });
+  if (duplicate) {
+    throw new Error(
+      duplicate.is_active
+        ? `Já existe um plano de ${category} para este veículo.`
+        : `Já existe um plano pausado de ${category} para este veículo. Reative ou edite o plano existente.`
+    );
+  }
 
   const now = new Date().toISOString();
   const plan: PreventiveMaintenancePlan = {
@@ -96,6 +136,14 @@ export async function updatePreventiveMaintenancePlan(params: {
   const category = normalizeCategory(params.category);
   const existing = await getPreventiveMaintenancePlanById(params.userId, params.planId);
   if (!existing) throw new Error("Plano preventivo não encontrado.");
+
+  const duplicate = await findDuplicatePlan({
+    userId: params.userId,
+    vehicleId: existing.vehicle_id,
+    category,
+    excludePlanId: existing.id
+  });
+  if (duplicate) throw new Error(`Já existe outro plano de ${category} para este veículo.`);
 
   const updated: PreventiveMaintenancePlan = {
     ...existing,
@@ -292,7 +340,6 @@ export async function getPreventiveMaintenanceOverviewForVehicle(
   return plans
     .filter((plan) => includeInactive || plan.is_active)
     .map((plan) => {
-      // Prioriza match estrutural por preventive_plan_id; fallback para texto em registros antigos
       const lastEvent = events
         .filter((event) => event.preventive_plan_id === plan.id || eventMatchesCategoryFallback(event, plan.category))
         .sort((a, b) => new Date(b.performed_at).getTime() - new Date(a.performed_at).getTime())[0] ?? null;

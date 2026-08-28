@@ -6,6 +6,7 @@ import { useAuth } from "@/context/AuthContext";
 import { getVehicles } from "@/services/VehicleService";
 import { endWorkSession, getActiveWorkSession, startWorkSession } from "@/services/WorkSessionService";
 import { computeWorkSessionMetrics, formatDuration, type WorkSessionMetrics } from "@/services/WorkSessionMetricsService";
+import { evaluateOdometerConsistency, getLatestKnownOdometerForVehicle } from "@/services/OdometerService";
 import { formatCentsToBRL } from "@/utils/formatters";
 import type { Vehicle, WorkSession } from "@/types";
 
@@ -18,6 +19,25 @@ function parseOdometer(value: string): number | null {
 
 function metricMoney(value: number | null): string {
   return value == null ? "—" : formatCentsToBRL(value);
+}
+
+async function confirmOdometerReading(userId: string, vehicleId: string, enteredKm: number): Promise<boolean> {
+  const latestKnownKm = await getLatestKnownOdometerForVehicle(userId, vehicleId);
+  const consistency = evaluateOdometerConsistency(enteredKm, latestKnownKm);
+  if (!consistency.isLowerThanKnown || consistency.latestKnownKm == null) return true;
+  const knownKm = consistency.latestKnownKm;
+
+  return new Promise((resolve) => {
+    Alert.alert(
+      "Quilometragem menor que o histórico",
+      `A maior leitura conhecida deste veículo é ${knownKm.toLocaleString("pt-BR")} km. Você informou ${enteredKm.toLocaleString("pt-BR")} km.\n\nSe isso for uma correção ou dado de teste, você pode continuar; caso contrário, confira o odômetro.`,
+      [
+        { text: "Revisar", style: "cancel", onPress: () => resolve(false) },
+        { text: "Continuar mesmo assim", onPress: () => resolve(true) }
+      ],
+      { cancelable: true, onDismiss: () => resolve(false) }
+    );
+  });
 }
 
 export default function WorkSessionScreen({ navigation }: any) {
@@ -82,6 +102,8 @@ export default function WorkSessionScreen({ navigation }: any) {
       return;
     }
 
+    if (!(await confirmOdometerReading(user.id, selectedVehicle.id, startKm))) return;
+
     setSaving(true);
     try {
       await startWorkSession({ userId: user.id, vehicleId: selectedVehicle.id, startOdometerKm: startKm });
@@ -101,6 +123,13 @@ export default function WorkSessionScreen({ navigation }: any) {
       Alert.alert("Odômetro inválido", "Informe a quilometragem atual para encerrar o turno.");
       return;
     }
+
+    if (activeSession.start_odometer_km != null && endKm < activeSession.start_odometer_km) {
+      Alert.alert("Não foi possível encerrar o turno", "Odômetro final não pode ser menor que o inicial.");
+      return;
+    }
+
+    if (activeSession.vehicle_id && !(await confirmOdometerReading(user.id, activeSession.vehicle_id, endKm))) return;
 
     setSaving(true);
     try {
