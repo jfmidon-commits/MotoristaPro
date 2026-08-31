@@ -94,12 +94,71 @@ export interface PendingDelete {
   attempts: number;
 }
 
+export type RidePlatform = "uber" | "99" | "indrive" | "other";
+export type CaptureSource = "manual" | "notification" | "accessibility" | "screenshot" | "fixture" | "other";
+export type DecisionLabel = "good" | "borderline" | "bad";
+
+export interface RideOffer {
+  id: string;
+  user_id: string;
+  vehicle_id: string | null;
+  work_session_id: string | null;
+  platform: RidePlatform;
+  category: string | null;
+  captured_at: string;
+  offered_amount: number;
+  pickup_distance_km: number | null;
+  pickup_duration_minutes: number | null;
+  trip_distance_km: number | null;
+  trip_duration_minutes: number | null;
+  total_expected_distance_km: number | null;
+  total_expected_duration_minutes: number | null;
+  approximate_origin_zone: string | null;
+  approximate_destination_zone: string | null;
+  additional_pay: number;
+  capture_source: CaptureSource;
+  extraction_confidence: number | null;
+  estimated_cost: number | null;
+  expected_net_profit: number | null;
+  expected_net_per_km: number | null;
+  expected_net_per_hour: number | null;
+  decision_label: DecisionLabel | null;
+  decision_score: number | null;
+  decision_reasons_positive_json: string | null;
+  decision_reasons_negative_json: string | null;
+  decision_confidence: number | null;
+  created_at: string;
+  sync_state: SyncState;
+  sync_error: string | null;
+}
+
+export interface RideResult {
+  id: string;
+  ride_offer_id: string;
+  user_id: string;
+  vehicle_id: string | null;
+  final_amount: number;
+  actual_distance_km: number | null;
+  actual_duration_minutes: number | null;
+  started_at: string | null;
+  ended_at: string | null;
+  estimated_cost: number | null;
+  net_profit: number | null;
+  net_per_km: number | null;
+  net_per_hour: number | null;
+  created_at: string;
+  sync_state: SyncState;
+  sync_error: string | null;
+}
+
 export interface SyncStatusSnapshot {
   pendingTransactions: number;
   pendingVehicles: number;
   pendingMaintenance: number;
   pendingWorkSessions: number;
   pendingPreventiveMaintenance: number;
+  pendingRideOffers: number;
+  pendingRideResults: number;
   pendingDeletes: number;
   lastSyncAttemptAt: string | null;
   lastSyncSuccessAt: string | null;

@@ -14,6 +14,8 @@ import {
   getPendingPreventiveMaintenancePlans,
   syncPreventiveMaintenancePlan
 } from "@/services/PreventiveMaintenanceService";
+import { getPendingRideOffers, syncRideOffer } from "@/services/RideOfferService";
+import { getPendingRideResults, syncRideResult } from "@/services/RideResultService";
 import { pullRemoteState } from "@/services/PullSyncService";
 import { useAuth } from "@/context/AuthContext";
 import type { SyncStatusSnapshot } from "@/types";
@@ -45,8 +47,10 @@ export function useTransactionSync() {
     pendingTransactions: 0,
     pendingVehicles: 0,
     pendingMaintenance: 0,
-    pendingWorkSessions: 1,
+    pendingWorkSessions: 0,
     pendingPreventiveMaintenance: 0,
+    pendingRideOffers: 0,
+    pendingRideResults: 0,
     pendingDeletes: 0,
     lastSyncAttemptAt: null,
     lastSyncSuccessAt: null,
@@ -56,12 +60,14 @@ export function useTransactionSync() {
 
   const updateStatus = useCallback(async () => {
     if (!user?.id) return;
-    const [tx, veh, maint, ws, preventive, del] = await Promise.all([
+    const [tx, veh, maint, ws, preventive, rideOffers, rideResults, del] = await Promise.all([
       getPendingTransactions(user.id),
       getPendingVehicles(user.id),
       getPendingMaintenanceEvents(user.id),
       getPendingWorkSessions(user.id),
       getPendingPreventiveMaintenancePlans(user.id),
+      getPendingRideOffers(user.id),
+      getPendingRideResults(user.id),
       getPendingDeletes(user.id)
     ]);
     setStatus((s) => ({
@@ -71,6 +77,8 @@ export function useTransactionSync() {
       pendingMaintenance: maint.length,
       pendingWorkSessions: ws.length,
       pendingPreventiveMaintenance: preventive.length,
+      pendingRideOffers: rideOffers.length,
+      pendingRideResults: rideResults.length,
       pendingDeletes: del.length
     }));
     setStatusReady(true);
@@ -102,15 +110,28 @@ export function useTransactionSync() {
       for (const plan of await getPendingPreventiveMaintenancePlans(user.id)) {
         await syncPreventiveMaintenancePlan(plan);
       }
+      for (const rideOffer of await getPendingRideOffers(user.id)) await syncRideOffer(rideOffer);
+      for (const rideResult of await getPendingRideResults(user.id)) await syncRideResult(rideResult);
 
       await pullRemoteState(user.id);
 
-      const [stillTx, stillVeh, stillMaint, stillWs, stillPreventive, stillDeletes] = await Promise.all([
+      const [
+        stillTx,
+        stillVeh,
+        stillMaint,
+        stillWs,
+        stillPreventive,
+        stillRideOffers,
+        stillRideResults,
+        stillDeletes
+      ] = await Promise.all([
         getPendingTransactions(user.id),
         getPendingVehicles(user.id),
         getPendingMaintenanceEvents(user.id),
         getPendingWorkSessions(user.id),
         getPendingPreventiveMaintenancePlans(user.id),
+        getPendingRideOffers(user.id),
+        getPendingRideResults(user.id),
         getPendingDeletes(user.id)
       ]);
       const stillPendingIds = new Set(stillTx.map((tx) => tx.id));
@@ -122,6 +143,8 @@ export function useTransactionSync() {
         stillMaint.length +
         stillWs.length +
         stillPreventive.length +
+        stillRideOffers.length +
+        stillRideResults.length +
         stillDeletes.length;
       const exhaustedTransactions = stillTx.filter(
         (tx) => (retryMeta.get(tx.id)?.attempts ?? 0) >= MAX_ATTEMPTS
@@ -133,6 +156,8 @@ export function useTransactionSync() {
         pendingMaintenance: stillMaint.length,
         pendingWorkSessions: stillWs.length,
         pendingPreventiveMaintenance: stillPreventive.length,
+        pendingRideOffers: stillRideOffers.length,
+        pendingRideResults: stillRideResults.length,
         pendingDeletes: stillDeletes.length,
         lastSyncSuccessAt: totalPending === 0 ? new Date().toISOString() : s.lastSyncSuccessAt,
         lastError: exhaustedTransactions.length > 0
