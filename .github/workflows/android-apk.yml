@@ -7,6 +7,7 @@ on:
       - stabilize/offline-sync
     paths:
       - "src/**"
+      - "modules/**"
       - "App.tsx"
       - "app.json"
       - "package.json"
@@ -17,6 +18,7 @@ on:
       - main
     paths:
       - "src/**"
+      - "modules/**"
       - "App.tsx"
       - "app.json"
       - "package.json"
