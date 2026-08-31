@@ -1,0 +1,46 @@
+name: Accessibility Native Check
+
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - "modules/motorista-notification-listener/**"
+      - "src/services/AccessibilityOfferParser.ts"
+      - "src/__tests__/AccessibilityOfferParser.test.ts"
+      - "src/screens/NotificationCaptureScreen.tsx"
+      - ".github/workflows/accessibility-native-check.yml"
+
+jobs:
+  native-compile:
+    if: github.head_ref == 'feature/ride-accessibility-capture'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Configure environment
+        run: cp .env.example .env.local
+
+      - name: Generate Android project
+        run: npx expo prebuild --platform android --non-interactive --clean
+
+      - name: Compile Kotlin only
+        working-directory: android
+        run: ./gradlew :app:compileReleaseKotlin --no-daemon
