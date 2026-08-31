@@ -47,7 +47,7 @@ export function useTransactionSync() {
     pendingTransactions: 0,
     pendingVehicles: 0,
     pendingMaintenance: 0,
-    pendingWorkSessions: 1,
+    pendingWorkSessions: 0,
     pendingPreventiveMaintenance: 0,
     pendingRideOffers: 0,
     pendingRideResults: 0,
