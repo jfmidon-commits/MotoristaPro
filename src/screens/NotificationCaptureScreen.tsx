@@ -25,6 +25,36 @@ function permissionLabel(status: NativeNotificationPermissionStatus): string {
   return "Recurso nativo indisponível nesta instalação";
 }
 
+function formatCapturedAt(value?: number | null): string {
+  if (!value) return "horário —";
+  try {
+    return new Date(value).toLocaleTimeString("pt-BR", {
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit"
+    });
+  } catch {
+    return "horário inválido";
+  }
+}
+
+function snapshotPreview(snapshot: AccessibilitySnapshot): string[] {
+  const seen = new Set<string>();
+  const lines: string[] = [];
+  for (const node of snapshot.nodes ?? []) {
+    const text = (node.text ?? "").trim().replace(/\s+/g, " ");
+    if (!text) continue;
+    const key = `${text.toLowerCase()}@${node.left ?? 0},${node.top ?? 0},${node.right ?? 0},${node.bottom ?? 0}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    lines.push(
+      `${text}  [${node.left ?? "?"},${node.top ?? "?"} → ${node.right ?? "?"},${node.bottom ?? "?"}]${node.clickable ? " • clicável" : ""}`
+    );
+    if (lines.length >= 18) break;
+  }
+  return lines;
+}
+
 export default function NotificationCaptureScreen() {
   const [status, setStatus] = useState<NativeNotificationPermissionStatus>("unavailable");
   const [a11yStatus, setA11yStatus] = useState<NativeNotificationPermissionStatus>("unavailable");
@@ -61,6 +91,7 @@ export default function NotificationCaptureScreen() {
     .reverse();
 
   const parsed = [...parsedA11y, ...parsedNotifications];
+  const latestSnapshots = snapshots.slice().reverse().slice(0, 5);
 
   return (
     <SafeAreaView style={styles.container} edges={["bottom"]}>
@@ -123,6 +154,45 @@ export default function NotificationCaptureScreen() {
             </View>
           ))
         )}
+
+        <Text style={styles.sectionTitle}>Diagnóstico dos snapshots</Text>
+        <Text style={styles.diagnosticHint}>
+          Mostra somente o conteúdo já sanitizado e mantido localmente. Use esta área para confirmar o que Uber/99 realmente expuseram ao serviço de acessibilidade.
+        </Text>
+        {latestSnapshots.length === 0 ? (
+          <Text style={styles.empty}>Nenhum snapshot capturado ainda.</Text>
+        ) : (
+          latestSnapshots.map((snapshot, index) => {
+            const raw = parseAccessibilitySnapshot(snapshot);
+            const preview = snapshotPreview(snapshot);
+            return (
+              <View key={`${snapshot.fingerprint ?? snapshot.capturedAt ?? index}-${index}`} style={styles.snapshotCard}>
+                <Text style={styles.snapshotTitle}>
+                  #{snapshots.length - index} • {snapshot.packageName}
+                </Text>
+                <Text style={styles.snapshotMeta}>
+                  {formatCapturedAt(snapshot.capturedAt)} • {snapshot.nodeCount ?? snapshot.nodes?.length ?? 0} nodes
+                  {snapshot.truncated ? " • truncado" : ""}
+                </Text>
+                <Text style={[styles.parserBadge, raw ? styles.parserOk : styles.parserMiss]}>
+                  {raw ? "PARSER: OFERTA RECONHECIDA" : "PARSER: NÃO RECONHECEU"}
+                </Text>
+                {raw ? (
+                  <Text style={styles.snapshotMeta}>
+                    bruto: R$ {raw.offeredAmount?.toFixed(2).replace(".", ",") ?? "—"} • pickup {raw.pickupDistanceKm ?? "—"} km / {raw.pickupDurationMinutes ?? "—"} min • viagem {raw.tripDistanceKm ?? "—"} km / {raw.tripDurationMinutes ?? "—"} min
+                  </Text>
+                ) : null}
+                {preview.length === 0 ? (
+                  <Text style={styles.empty}>Snapshot sem texto operacional persistido.</Text>
+                ) : (
+                  preview.map((line, lineIndex) => (
+                    <Text key={`${index}-${lineIndex}`} style={styles.snapshotLine}>{line}</Text>
+                  ))
+                )}
+              </View>
+            );
+          })
+        )}
       </ScrollView>
     </SafeAreaView>
   );
@@ -146,5 +216,13 @@ const styles = StyleSheet.create({
   empty: { color: "#94A3B8", lineHeight: 20 },
   offerCard: { backgroundColor: "#1E293B", borderRadius: 12, padding: 14, marginBottom: 10 },
   offerTitle: { color: "#fff", fontWeight: "900" },
-  offerText: { color: "#94A3B8", marginTop: 5 }
+  offerText: { color: "#94A3B8", marginTop: 5 },
+  diagnosticHint: { color: "#94A3B8", fontSize: 13, lineHeight: 18, marginBottom: 10 },
+  snapshotCard: { backgroundColor: "#111827", borderRadius: 12, padding: 14, marginBottom: 12, borderWidth: 1, borderColor: "#334155" },
+  snapshotTitle: { color: "#F8FAFC", fontWeight: "900", fontSize: 14 },
+  snapshotMeta: { color: "#94A3B8", fontSize: 12, lineHeight: 18, marginTop: 4 },
+  parserBadge: { fontSize: 12, fontWeight: "900", marginTop: 8, marginBottom: 6 },
+  parserOk: { color: "#4ADE80" },
+  parserMiss: { color: "#F87171" },
+  snapshotLine: { color: "#CBD5E1", fontSize: 12, lineHeight: 17, marginTop: 3 }
 });
