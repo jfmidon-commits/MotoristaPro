@@ -42,4 +42,25 @@ describe("ReconciliationEngine", () => {
     expect(result.isRelevantDivergence).toBe(false);
     expect(result.reviewMessage).toBeNull();
   });
+
+  it("considera adicional da oferta ao comparar o valor final", () => {
+    const result = reconcileRide(
+      {
+        offered_amount: 1000,
+        additional_pay: 200,
+        total_expected_distance_km: 6,
+        total_expected_duration_minutes: 15
+      },
+      {
+        final_amount: 1000,
+        actual_distance_km: 6,
+        actual_duration_minutes: 15
+      }
+    );
+
+    expect(result.amountDeltaCents).toBe(-200);
+    expect(result.amountDeltaPercent).toBeCloseTo(-16.67, 1);
+    expect(result.offeredGrossPerKmCents).toBe(200);
+    expect(result.isRelevantDivergence).toBe(true);
+  });
 });
