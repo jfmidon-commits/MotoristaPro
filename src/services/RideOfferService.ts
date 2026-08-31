@@ -129,7 +129,15 @@ async function markRideOfferSyncState(id: string, state: RideOffer["sync_state"]
 export async function getPendingRideOffers(userId: string): Promise<RideOffer[]> {
   const db = await getDb();
   return db.getAllAsync<RideOffer>(
-    `SELECT * FROM ride_offers WHERE user_id = ? AND sync_state != 'synced' ORDER BY created_at ASC`,
+    `SELECT ro.* FROM ride_offers ro
+     WHERE ro.user_id = ? AND ro.sync_state != 'synced'
+       AND NOT EXISTS (
+         SELECT 1 FROM pending_deletes pd
+         WHERE pd.user_id = ro.user_id
+           AND pd.table_name = 'ride_offers'
+           AND pd.record_id = ro.id
+       )
+     ORDER BY ro.created_at ASC`,
     [userId]
   );
 }
