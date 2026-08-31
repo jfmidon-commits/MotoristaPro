@@ -2,7 +2,6 @@ package expo.modules.motoristanotificationlistener
 
 import android.content.Intent
 import android.provider.Settings
-import androidx.core.app.NotificationManagerCompat
 import expo.modules.kotlin.modules.Module
 import expo.modules.kotlin.modules.ModuleDefinition
 
@@ -12,7 +11,7 @@ class MotoristaNotificationListenerModule : Module() {
 
     Function("getPermissionStatus") {
       val context = appContext.reactContext ?: return@Function "unavailable"
-      val enabled = NotificationManagerCompat.getEnabledListenerPackages(context)
+      val enabled = Settings.Secure.getString(context.contentResolver, "enabled_notification_listeners") ?: ""
       if (enabled.contains(context.packageName)) "granted" else "denied"
     }
 
