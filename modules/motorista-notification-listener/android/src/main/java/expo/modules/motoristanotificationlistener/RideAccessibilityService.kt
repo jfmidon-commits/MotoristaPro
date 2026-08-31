@@ -43,22 +43,16 @@ class RideAccessibilityService : AccessibilityService() {
     private const val DEBOUNCE_MS = 350L
     private const val FINGERPRINT_TTL_MS = 4_000L
 
-    private val KEEP_PATTERNS = listOf(
-      Regex("""R\$\s*[0-9]"""),
-      Regex("""[0-9]+(?:[.,][0-9]+)?\s*km""", RegexOption.IGNORE_CASE),
+    private val OPERATIONAL_FRAGMENT_PATTERNS = listOf(
+      Regex("""R\$\s*[0-9]{1,5}(?:\.[0-9]{3})*(?:,[0-9]{1,2})?(?:\s*/\s*km)?""", RegexOption.IGNORE_CASE),
+      Regex("""[0-9]+(?:[.,][0-9]+)?\s*km\b""", RegexOption.IGNORE_CASE),
       Regex("""[0-9]+(?:[.,][0-9]+)?\s*m\b""", RegexOption.IGNORE_CASE),
-      Regex("""[0-9]+(?:[.,][0-9]+)?\s*min""", RegexOption.IGNORE_CASE),
-      Regex("""\bUberX\b|\bComfort\b|\bBlack\b|\bPop\b|\bPop Expresso\b|\bExclusivo\b""", RegexOption.IGNORE_CASE),
-      Regex("""\bAceitar\b|\bRecusar\b|\bTarifa\b|\bExpresso\b|\bdinâmica\b|\bdinamica\b""", RegexOption.IGNORE_CASE),
-      Regex("""\b/km\b|\bpor km\b""", RegexOption.IGNORE_CASE),
-      Regex("""\bcategoria\b|\bcorrida\b|\boferta\b""", RegexOption.IGNORE_CASE)
-    )
-
-    private val DROP_PII_HINTS = listOf(
-      Regex("""rua\s+|avenida\s+|av\.|r\.\s+|alameda\s+|travessa\s+""", RegexOption.IGNORE_CASE),
-      Regex("""\bcep\b|\bcidade\b|\bbairro\b""", RegexOption.IGNORE_CASE),
-      Regex("""@"""),
-      Regex("""\+?\d{2,3}\s?\d{4,5}[- ]?\d{4}""")
+      Regex("""[0-9]+(?:[.,][0-9]+)?\s*(?:min|minuto|minutos)\b""", RegexOption.IGNORE_CASE),
+      Regex("""\bUberX\b|\bComfort\b|\bBlack\b|\bPop Expresso\b|\bPop\b|\bExclusivo\b""", RegexOption.IGNORE_CASE),
+      Regex("""\bAceitar\b|\bRecusar\b|\bTarifa\b|\bExpresso\b|\bdinâmica\b|\bdinamica\b|\bbase\b""", RegexOption.IGNORE_CASE),
+      Regex("""\bb[oô]nus\b|\bsaldo\b|\bganhos\b|\bpromo(?:ção|cao)?\b""", RegexOption.IGNORE_CASE),
+      Regex("""\bpor\s+km\b|/\s*km\b""", RegexOption.IGNORE_CASE),
+      Regex("""\bcategoria\b|\bcorrida\b|\boferta\b|\bnova solicita[cç][aã]o\b|\bnova corrida\b""", RegexOption.IGNORE_CASE)
     )
   }
 
@@ -269,25 +263,22 @@ class RideAccessibilityService : AccessibilityService() {
       .filter { it.isNotEmpty() }
       .distinct()
 
-    for (c in candidates) {
-      // Whitelist-only persistence: free-form text is never stored just because it
-      // does not look like PII. Only operational tokens needed by the parser survive.
-      if (!looksOperational(c)) continue
+    for (candidate in candidates) {
+      val sanitized = sanitizeOperationalText(candidate) ?: continue
       val key = buildString {
-        append(normalizeForDedupe(c))
+        append(normalizeForDedupe(sanitized))
         append('@').append(bounds.left).append(',').append(bounds.top)
         append(',').append(bounds.right).append(',').append(bounds.bottom)
       }
       if (key in seen) continue
       seen.add(key)
-      return c
+      return sanitized
     }
     return null
   }
 
   private fun shouldKeepNode(text: String?, viewId: String?, className: String?): Boolean {
-    if (text != null && looksOperational(text)) return true
-    // Geometry/view metadata can remain for diagnostics even when free-form text is dropped.
+    if (!text.isNullOrBlank()) return true
     if (!viewId.isNullOrBlank()) return true
     if (className != null && (className.contains("Button", true) || className.contains("TextView", true))) {
       return true
@@ -295,13 +286,32 @@ class RideAccessibilityService : AccessibilityService() {
     return false
   }
 
-  private fun looksOperational(value: String): Boolean {
-    return KEEP_PATTERNS.any { it.containsMatchIn(value) }
+  /**
+   * Extracts only operational fragments needed for offer parsing. The original node text
+   * is never persisted, so a node that also contains an address/name keeps only tokens
+   * such as price, distance, time, category and known fare labels.
+   */
+  private fun sanitizeOperationalText(value: String): String? {
+    val fragments = mutableListOf<Pair<Int, String>>()
+    for (pattern in OPERATIONAL_FRAGMENT_PATTERNS) {
+      pattern.findAll(value).forEach { match ->
+        fragments.add(match.range.first to match.value.trim())
+      }
+    }
+    if (fragments.isEmpty()) return null
+
+    val seen = HashSet<String>()
+    val ordered = fragments
+      .sortedBy { it.first }
+      .map { it.second }
+      .filter { fragment -> seen.add(normalizeForDedupe(fragment)) }
+
+    if (ordered.isEmpty()) return null
+    return ordered.joinToString(" • ").take(MAX_CHARS_PER_TEXT)
   }
 
-  private fun looksLikePii(value: String): Boolean {
-    if (value.length > 48 && !looksOperational(value)) return true
-    return DROP_PII_HINTS.any { it.containsMatchIn(value) }
+  private fun looksOperational(value: String): Boolean {
+    return OPERATIONAL_FRAGMENT_PATTERNS.any { it.containsMatchIn(value) }
   }
 
   private fun normalizeForDedupe(value: String): String {
