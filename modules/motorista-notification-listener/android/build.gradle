@@ -8,12 +8,14 @@ def expoModulesCorePlugin = new File(project(":expo-modules-core").projectDir.ab
 apply from: expoModulesCorePlugin
 applyKotlinExpoModulesCorePlugin()
 useCoreDependencies()
-useExpoPublishing()
 
 android {
   namespace "expo.modules.motoristanotificationlistener"
+  compileSdkVersion rootProject.ext.compileSdkVersion
 
   defaultConfig {
+    minSdkVersion rootProject.ext.minSdkVersion
+    targetSdkVersion rootProject.ext.targetSdkVersion
     versionCode 1
     versionName "0.1.0"
   }
