@@ -41,6 +41,18 @@ jobs:
       - name: Generate Android project
         run: npx expo prebuild --platform android --non-interactive --clean
 
+      - name: Ensure splash background resource
+        run: |
+          mkdir -p android/app/src/main/res/values
+          cat > android/app/src/main/res/values/motoristapro_splash.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <resources>
+            <color name="splashscreen_background">#0F172A</color>
+          </resources>
+          EOF
+
       - name: Compile Kotlin only
         working-directory: android
+        env:
+          NODE_ENV: production
         run: ./gradlew :app:compileReleaseKotlin --no-daemon
