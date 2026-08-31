@@ -1,4 +1,4 @@
-import { requireNativeModule } from "expo-modules-core";
+import { requireOptionalNativeModule } from "expo-modules-core";
 
 export type NativeNotificationPermissionStatus = "granted" | "denied" | "unavailable";
 
@@ -19,17 +19,18 @@ type NativeModuleShape = {
   clearPendingNotifications(): boolean;
 };
 
-const NativeModule = requireNativeModule<NativeModuleShape>("MotoristaNotificationListener");
+const NativeModule = requireOptionalNativeModule<NativeModuleShape>("MotoristaNotificationListener");
 
 export function getNotificationAccessStatus(): NativeNotificationPermissionStatus {
-  return NativeModule.getPermissionStatus();
+  return NativeModule?.getPermissionStatus() ?? "unavailable";
 }
 
 export function openNotificationAccessSettings(): boolean {
-  return NativeModule.openNotificationAccessSettings();
+  return NativeModule?.openNotificationAccessSettings() ?? false;
 }
 
 export function getPendingRideNotifications(): CapturedRideNotification[] {
+  if (!NativeModule) return [];
   try {
     const parsed = JSON.parse(NativeModule.getPendingNotificationsJson());
     return Array.isArray(parsed) ? parsed : [];
@@ -39,5 +40,5 @@ export function getPendingRideNotifications(): CapturedRideNotification[] {
 }
 
 export function clearPendingRideNotifications(): boolean {
-  return NativeModule.clearPendingNotifications();
+  return NativeModule?.clearPendingNotifications() ?? false;
 }
