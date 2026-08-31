@@ -14,6 +14,7 @@ import SyncStatusScreen from "@/screens/SyncStatusScreen";
 import WorkSessionScreen from "@/screens/WorkSessionScreen";
 import WorkSessionHistoryScreen from "@/screens/WorkSessionHistoryScreen";
 import WorkSessionDetailScreen from "@/screens/WorkSessionDetailScreen";
+import NotificationCaptureScreen from "@/screens/NotificationCaptureScreen";
 
 const Stack = createNativeStackNavigator();
 
@@ -50,6 +51,7 @@ export default function AppNavigator() {
             <Stack.Screen name="Vehicles" component={VehiclesScreen} options={{ title: "Veículos" }} />
             <Stack.Screen name="Maintenance" component={MaintenanceScreen} options={{ title: "Manutenção" }} />
             <Stack.Screen name="PreventiveMaintenance" component={PreventiveMaintenanceScreen} options={{ title: "Manutenção preventiva" }} />
+            <Stack.Screen name="NotificationCapture" component={NotificationCaptureScreen} options={{ title: "Captura automática" }} />
             <Stack.Screen name="SyncStatus" component={SyncStatusScreen} options={{ title: "Status de Sincronização" }} />
           </>
         )}
