@@ -1,5 +1,4 @@
 import type { CaptureSource, RidePlatform } from "@/types";
-import { parseBRLInputToCents } from "@/utils/formatters";
 
 export interface RawRideOfferInput {
   platform: RidePlatform | string;
@@ -45,25 +44,38 @@ function normalizePlatform(value: string): RidePlatform {
   return "other";
 }
 
+function parseLocaleDecimalString(value: string): number | null {
+  const stripped = value.replace(/[^\d,.-]/g, "");
+  if (!stripped) return null;
+  const comma = stripped.lastIndexOf(",");
+  const dot = stripped.lastIndexOf(".");
+  const decimalIndex = Math.max(comma, dot);
+
+  let normalized = stripped;
+  if (decimalIndex >= 0) {
+    const integerPart = stripped.slice(0, decimalIndex).replace(/[.,]/g, "");
+    const decimalPart = stripped.slice(decimalIndex + 1).replace(/[.,]/g, "");
+    normalized = decimalPart ? `${integerPart}.${decimalPart}` : integerPart;
+  }
+
+  const parsed = Number.parseFloat(normalized);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
 function parseDecimal(value: string | number | null | undefined): number | null {
   if (value == null || value === "") return null;
   if (typeof value === "number") return Number.isFinite(value) ? value : null;
   const cleaned = value
     .toLowerCase()
     .replace(/km|quil[oô]metros?|min(?:utos?)?|h(?:oras?)?/g, "")
-    .replace(/\s/g, "")
-    .replace(/\./g, "")
-    .replace(",", ".")
-    .replace(/[^\d.-]/g, "");
-  if (!cleaned) return null;
-  const parsed = Number.parseFloat(cleaned);
-  return Number.isFinite(parsed) ? parsed : null;
+    .replace(/\s/g, "");
+  return parseLocaleDecimalString(cleaned);
 }
 
 function parseMoneyToCents(value: string | number | null | undefined): number {
   if (value == null || value === "") return 0;
-  if (typeof value === "number") return Math.round(value * 100);
-  return parseBRLInputToCents(value);
+  const amount = typeof value === "number" ? value : parseLocaleDecimalString(value);
+  return amount == null || !Number.isFinite(amount) ? 0 : Math.round(amount * 100);
 }
 
 function positiveOrNull(value: number | null): number | null {
@@ -73,6 +85,15 @@ function positiveOrNull(value: number | null): number | null {
 function inferTotal(a: number | null, b: number | null): number | null {
   if (a == null && b == null) return null;
   return (a ?? 0) + (b ?? 0);
+}
+
+function capturedAtIso(value: Date | string | undefined): string {
+  if (value instanceof Date && Number.isFinite(value.getTime())) return value.toISOString();
+  if (typeof value === "string") {
+    const parsed = new Date(value);
+    if (Number.isFinite(parsed.getTime())) return parsed.toISOString();
+  }
+  return new Date().toISOString();
 }
 
 export function normalizeRideOffer(input: RawRideOfferInput): NormalizedRideOffer {
@@ -101,10 +122,6 @@ export function normalizeRideOffer(input: RawRideOfferInput): NormalizedRideOffe
     additionalPayCents: Math.max(0, parseMoneyToCents(input.additionalPay)),
     captureSource: input.captureSource ?? "manual",
     extractionConfidence,
-    capturedAtIso: input.capturedAt instanceof Date
-      ? input.capturedAt.toISOString()
-      : input.capturedAt
-        ? new Date(input.capturedAt).toISOString()
-        : new Date().toISOString()
+    capturedAtIso: capturedAtIso(input.capturedAt)
   };
 }
