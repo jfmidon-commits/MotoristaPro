@@ -5,6 +5,7 @@ on:
   push:
     branches:
       - stabilize/offline-sync
+      - feature/ride-accessibility-capture
     paths:
       - "src/**"
       - "modules/**"
