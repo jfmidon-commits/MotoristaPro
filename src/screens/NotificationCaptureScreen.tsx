@@ -3,14 +3,20 @@ import { Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useFocusEffect } from "@react-navigation/native";
 import {
+  clearPendingAccessibilitySnapshots,
   clearPendingRideNotifications,
+  getAccessibilityAccessStatus,
   getNotificationAccessStatus,
+  getPendingAccessibilitySnapshots,
   getPendingRideNotifications,
+  openAccessibilitySettings,
   openNotificationAccessSettings,
+  type AccessibilitySnapshot,
   type CapturedRideNotification,
   type NativeNotificationPermissionStatus
 } from "../../modules/motorista-notification-listener";
 import { parseRideNotification } from "@/services/NotificationOfferParser";
+import { parseAccessibilitySnapshot } from "@/services/AccessibilityOfferParser";
 import { normalizeRideOffer } from "@/services/RideOfferNormalizer";
 
 function permissionLabel(status: NativeNotificationPermissionStatus): string {
@@ -21,18 +27,22 @@ function permissionLabel(status: NativeNotificationPermissionStatus): string {
 
 export default function NotificationCaptureScreen() {
   const [status, setStatus] = useState<NativeNotificationPermissionStatus>("unavailable");
+  const [a11yStatus, setA11yStatus] = useState<NativeNotificationPermissionStatus>("unavailable");
   const [notifications, setNotifications] = useState<CapturedRideNotification[]>([]);
+  const [snapshots, setSnapshots] = useState<AccessibilitySnapshot[]>([]);
 
   const load = useCallback(() => {
     setStatus(getNotificationAccessStatus());
+    setA11yStatus(getAccessibilityAccessStatus());
     setNotifications(getPendingRideNotifications());
+    setSnapshots(getPendingAccessibilitySnapshots());
   }, []);
 
   useFocusEffect(useCallback(() => {
     load();
   }, [load]));
 
-  const parsed = notifications
+  const parsedNotifications = notifications
     .map((notification) => {
       const raw = parseRideNotification(notification);
       return raw ? normalizeRideOffer(raw) : null;
@@ -41,28 +51,47 @@ export default function NotificationCaptureScreen() {
     .slice()
     .reverse();
 
+  const parsedA11y = snapshots
+    .map((snapshot) => {
+      const raw = parseAccessibilitySnapshot(snapshot);
+      return raw ? normalizeRideOffer(raw) : null;
+    })
+    .filter((item): item is NonNullable<typeof item> => item != null)
+    .slice()
+    .reverse();
+
+  const parsed = [...parsedA11y, ...parsedNotifications];
+
   return (
     <SafeAreaView style={styles.container} edges={["bottom"]}>
       <ScrollView contentContainerStyle={styles.content}>
         <Text style={styles.title}>Captura automática de ofertas</Text>
         <Text style={styles.body}>
-          O MotoristaPro pode receber notificações de apps de corrida para identificar valor, distância e tempo sem exigir digitação durante a condução.
+          O MotoristaPro pode receber notificações e capturar snapshots sanitizados da tela de apps de corrida para identificar valor, distância e tempo sem exigir digitação durante a condução.
         </Text>
 
         <View style={styles.notice}>
           <Text style={styles.noticeTitle}>Privacidade</Text>
           <Text style={styles.body}>
-            Nesta etapa o listener filtra apenas pacotes de apps de corrida e mantém uma fila local curta. O parser financeiro não persiste nome, endereço ou texto bruto da notificação no banco de corridas.
+            O listener de notificação e o serviço de acessibilidade filtram apenas pacotes de apps de corrida e mantêm filas locais curtas. Textos operacionais são preferidos; nomes e endereços completos não são persistidos quando podem ser descartados. Nada é enviado ao Supabase nesta etapa.
           </Text>
         </View>
 
         <View style={styles.statusCard}>
-          <Text style={styles.statusTitle}>{permissionLabel(status)}</Text>
+          <Text style={styles.statusTitle}>Notificações: {permissionLabel(status)}</Text>
           <Text style={styles.statusText}>{notifications.length} notificação(ões) candidata(s) na fila local.</Text>
+        </View>
+
+        <View style={styles.statusCard}>
+          <Text style={styles.statusTitle}>Acessibilidade: {permissionLabel(a11yStatus)}</Text>
+          <Text style={styles.statusText}>{snapshots.length} snapshot(s) sanitizado(s) na fila local.</Text>
         </View>
 
         <Pressable style={styles.primaryButton} onPress={() => openNotificationAccessSettings()}>
           <Text style={styles.primaryButtonText}>Abrir acesso às notificações</Text>
+        </Pressable>
+        <Pressable style={styles.primaryButton} onPress={() => openAccessibilitySettings()}>
+          <Text style={styles.primaryButtonText}>Abrir configurações de acessibilidade</Text>
         </Pressable>
         <Pressable style={styles.secondaryButton} onPress={load}>
           <Text style={styles.secondaryButtonText}>Atualizar diagnóstico</Text>
@@ -71,10 +100,11 @@ export default function NotificationCaptureScreen() {
           style={styles.secondaryButton}
           onPress={() => {
             clearPendingRideNotifications();
+            clearPendingAccessibilitySnapshots();
             load();
           }}
         >
-          <Text style={styles.secondaryButtonText}>Limpar fila de diagnóstico</Text>
+          <Text style={styles.secondaryButtonText}>Limpar filas de diagnóstico</Text>
         </Pressable>
 
         <Text style={styles.sectionTitle}>Ofertas reconhecidas</Text>
@@ -83,7 +113,7 @@ export default function NotificationCaptureScreen() {
         ) : (
           parsed.map((offer, index) => (
             <View key={`${offer.capturedAtIso}-${index}`} style={styles.offerCard}>
-              <Text style={styles.offerTitle}>{offer.platform.toUpperCase()} • R$ {(offer.offeredAmountCents / 100).toFixed(2).replace(".", ",")}</Text>
+              <Text style={styles.offerTitle}>{offer.platform.toUpperCase()} • R$ {(offer.offeredAmountCents / 100).toFixed(2).replace(".", ",")} • {offer.captureSource}</Text>
               <Text style={styles.offerText}>
                 {offer.totalExpectedDistanceKm != null ? `${offer.totalExpectedDistanceKm.toFixed(1)} km` : "km —"}
                 {" • "}
