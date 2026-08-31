@@ -84,7 +84,7 @@ function positiveOrNull(value: number | null): number | null {
 
 function inferTotal(a: number | null, b: number | null): number | null {
   if (a == null && b == null) return null;
-  return (a ?? 0) + (b ?? 0);
+  return Math.round(((a ?? 0) + (b ?? 0)) * 1000) / 1000;
 }
 
 function capturedAtIso(value: Date | string | undefined): string {
