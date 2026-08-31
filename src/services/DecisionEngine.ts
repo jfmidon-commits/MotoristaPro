@@ -52,10 +52,13 @@ export function decideRide(
   let label: DecisionLabel;
   if (availableRatios.length === 0) {
     label = "borderline";
-  } else if (availableRatios.every((item) => item >= 1)) {
-    label = "good";
   } else if (availableRatios.some((item) => item < 1 - tolerance)) {
     label = "bad";
+  } else if (availableRatios.length < 2) {
+    // Nunca sinalizar verde quando falta uma das duas métricas-mãe.
+    label = "borderline";
+  } else if (availableRatios.every((item) => item >= 1)) {
+    label = "good";
   } else {
     label = "borderline";
   }
