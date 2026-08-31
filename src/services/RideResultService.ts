@@ -115,7 +115,15 @@ async function markRideResultSyncState(id: string, state: RideResult["sync_state
 export async function getPendingRideResults(userId: string): Promise<RideResult[]> {
   const db = await getDb();
   return db.getAllAsync<RideResult>(
-    `SELECT * FROM ride_results WHERE user_id = ? AND sync_state != 'synced' ORDER BY created_at ASC`,
+    `SELECT rr.* FROM ride_results rr
+     WHERE rr.user_id = ? AND rr.sync_state != 'synced'
+       AND NOT EXISTS (
+         SELECT 1 FROM pending_deletes pd
+         WHERE pd.user_id = rr.user_id
+           AND pd.table_name = 'ride_results'
+           AND pd.record_id = rr.id
+       )
+     ORDER BY rr.created_at ASC`,
     [userId]
   );
 }
