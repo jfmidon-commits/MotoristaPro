@@ -38,6 +38,14 @@ function formatCapturedAt(value?: number | null): string {
   }
 }
 
+function formatRawAmount(value?: number | string | null): string {
+  if (value == null || value === "") return "—";
+  if (typeof value === "number") {
+    return Number.isFinite(value) ? value.toFixed(2).replace(".", ",") : "—";
+  }
+  return value.trim() || "—";
+}
+
 function snapshotPreview(snapshot: AccessibilitySnapshot): string[] {
   const seen = new Set<string>();
   const lines: string[] = [];
@@ -179,7 +187,7 @@ export default function NotificationCaptureScreen() {
                 </Text>
                 {raw ? (
                   <Text style={styles.snapshotMeta}>
-                    bruto: R$ {raw.offeredAmount?.toFixed(2).replace(".", ",") ?? "—"} • pickup {raw.pickupDistanceKm ?? "—"} km / {raw.pickupDurationMinutes ?? "—"} min • viagem {raw.tripDistanceKm ?? "—"} km / {raw.tripDurationMinutes ?? "—"} min
+                    bruto: R$ {formatRawAmount(raw.offeredAmount)} • pickup {raw.pickupDistanceKm ?? "—"} km / {raw.pickupDurationMinutes ?? "—"} min • viagem {raw.tripDistanceKm ?? "—"} km / {raw.tripDurationMinutes ?? "—"} min
                   </Text>
                 ) : null}
                 {preview.length === 0 ? (
