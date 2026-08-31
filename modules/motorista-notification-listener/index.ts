@@ -12,11 +12,36 @@ export interface CapturedRideNotification {
   subText?: string | null;
 }
 
+export interface AccessibilityNodeSnapshot {
+  text?: string | null;
+  viewId?: string | null;
+  className?: string | null;
+  left?: number | null;
+  top?: number | null;
+  right?: number | null;
+  bottom?: number | null;
+  clickable?: boolean | null;
+}
+
+export interface AccessibilitySnapshot {
+  packageName: string;
+  eventType?: number | null;
+  capturedAt?: number | null;
+  nodeCount?: number | null;
+  nodes?: AccessibilityNodeSnapshot[];
+  fingerprint?: string | null;
+  truncated?: boolean | null;
+}
+
 type NativeModuleShape = {
   getPermissionStatus(): NativeNotificationPermissionStatus;
   openNotificationAccessSettings(): boolean;
   getPendingNotificationsJson(): string;
   clearPendingNotifications(): boolean;
+  getAccessibilityPermissionStatus(): NativeNotificationPermissionStatus;
+  openAccessibilitySettings(): boolean;
+  getPendingAccessibilitySnapshotsJson(): string;
+  clearPendingAccessibilitySnapshots(): boolean;
 };
 
 const NativeModule = requireOptionalNativeModule<NativeModuleShape>("MotoristaNotificationListener");
@@ -41,4 +66,26 @@ export function getPendingRideNotifications(): CapturedRideNotification[] {
 
 export function clearPendingRideNotifications(): boolean {
   return NativeModule?.clearPendingNotifications() ?? false;
+}
+
+export function getAccessibilityAccessStatus(): NativeNotificationPermissionStatus {
+  return NativeModule?.getAccessibilityPermissionStatus() ?? "unavailable";
+}
+
+export function openAccessibilitySettings(): boolean {
+  return NativeModule?.openAccessibilitySettings() ?? false;
+}
+
+export function getPendingAccessibilitySnapshots(): AccessibilitySnapshot[] {
+  if (!NativeModule) return [];
+  try {
+    const parsed = JSON.parse(NativeModule.getPendingAccessibilitySnapshotsJson());
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+export function clearPendingAccessibilitySnapshots(): boolean {
+  return NativeModule?.clearPendingAccessibilitySnapshots() ?? false;
 }
