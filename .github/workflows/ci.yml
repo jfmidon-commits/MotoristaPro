@@ -23,22 +23,4 @@ jobs:
         run: npm run typecheck
 
       - name: Testes unitários
-        id: unit_tests
-        shell: bash
-        run: |
-          set +e
-          npm test -- --ci --json --outputFile=test-results.json
-          code=$?
-          echo "exit_code=$code" >> "$GITHUB_OUTPUT"
-          exit 0
-
-      - name: Publicar resultado dos testes
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: test-results
-          path: test-results.json
-
-      - name: Falhar CI quando testes falharem
-        if: steps.unit_tests.outputs.exit_code != '0'
-        run: exit 1
+        run: npm test -- --ci
