@@ -6,6 +6,20 @@ function compact(parts: Array<string | null | undefined>): string {
   return Array.from(new Set(parts.map((part) => part?.trim()).filter((part): part is string => Boolean(part)))).join(" • ");
 }
 
+function buildConsolidatedText(payload: RideNotificationPayload): string {
+  return compact([
+    ...(payload.textLines ?? []),
+    payload.text,
+    payload.bigText,
+    payload.summaryText,
+    payload.infoText,
+    payload.bigContentTitle,
+    payload.tickerText,
+    payload.title,
+    payload.subText
+  ]);
+}
+
 function detectPlatform(payload: RideNotificationPayload): RidePlatform | null {
   const source = `${payload.packageName ?? ""} ${payload.appLabel ?? ""}`.toLowerCase();
   if (source.includes("uber")) return "uber";
@@ -23,6 +37,15 @@ function parseDecimal(raw: string): number | null {
 function extractAmount(text: string): string | null {
   const match = text.match(/R\$\s*([0-9]{1,4}(?:\.[0-9]{3})*(?:,[0-9]{1,2})?)/i);
   return match ? `R$ ${match[1]}` : null;
+}
+
+function extractAmountLoose(text: string): string | null {
+  const match = text.match(/(?:R\$|\$)\s*([0-9]{1,4}(?:\.[0-9]{3})*(?:[.,][0-9]{1,2})?)/i);
+  if (!match) return null;
+  const value = parseDecimal(match[1]);
+  if (value == null || value <= 0 || value > 5000) return null;
+  const formatted = value.toFixed(2).replace(".", ",");
+  return `R$ ${formatted}`;
 }
 
 function extractDistances(text: string): number[] {
@@ -58,18 +81,18 @@ function parsePostedAt(value: RideNotificationPayload["postedAt"]): Date | strin
 }
 
 /**
- * Converte somente dados operacionais presentes na notificação em uma oferta bruta.
- * Não guarda título/texto cru nem tenta persistir nome/endereço de passageiro.
+ * Converte somente fragmentos operacionais já extraídos da notificação em uma oferta bruta.
+ * O listener nativo persiste apenas fragmentos sanitizados e sinais booleanos sobre extras.
  * Quando a notificação não traz dados suficientes, retorna null para evitar falsos positivos.
  */
 export function parseRideNotification(payload: RideNotificationPayload): RawRideOfferInput | null {
   const platform = detectPlatform(payload);
   if (!platform) return null;
 
-  const text = compact([payload.title, payload.text, payload.bigText, payload.subText]);
+  const text = buildConsolidatedText(payload);
   if (!text) return null;
 
-  const amount = extractAmount(text);
+  const amount = extractAmount(text) ?? extractAmountLoose(text);
   if (!amount) return null;
 
   const distances = extractDistances(text);
@@ -88,6 +111,7 @@ export function parseRideNotification(payload: RideNotificationPayload): RawRide
   const totalExpectedDurationMinutes = twoLegDuration ? null : (durations[0] ?? null);
 
   let confidence = 0.55;
+  if ((payload.textLines?.length ?? 0) > 0) confidence += 0.05;
   if (distances.length > 0) confidence += 0.15;
   if (durations.length > 0) confidence += 0.15;
   if (twoLegDistance && twoLegDuration) confidence += 0.1;
