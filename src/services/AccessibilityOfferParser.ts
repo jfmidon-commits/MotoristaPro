@@ -38,10 +38,46 @@ const OFFER_MARKERS = [
 
 const RATE_HINTS = [/\/\s*km/i, /por\s*km/i];
 const TARIFF_HINTS = [/tarifa/i, /expresso/i, /din[aâ]mica/i, /base/i];
-const BONUS_HINTS = [/b[oô]nus/i, /promo/i, /promo[cç][aã]o/i, /ganhos/i, /saldo/i];
+const BONUS_HINTS = [
+  /b[oô]nus/i,
+  /promo/i,
+  /promo[cç][aã]o/i,
+  /ganhos/i,
+  /saldo/i,
+  /inclu[ií]do/i,
+  /adicional/i
+];
 
+/**
+ * OCR from Brazilian ride cards can mix decimal comma and decimal point:
+ * money tends to be "28,24" while distance can be "3.7" / "14.9".
+ * The old implementation stripped every dot and turned 3.7 into 37.
+ */
 function parseDecimal(raw: string): number | null {
-  const normalized = raw.replace(/\./g, "").replace(",", ".");
+  const cleaned = raw.trim().replace(/\s+/g, "");
+  if (!/^\d[\d.,]*$/.test(cleaned)) return null;
+
+  const comma = cleaned.lastIndexOf(",");
+  const dot = cleaned.lastIndexOf(".");
+  const decimalIndex = Math.max(comma, dot);
+
+  if (decimalIndex < 0) {
+    const value = Number.parseFloat(cleaned);
+    return Number.isFinite(value) ? value : null;
+  }
+
+  const separators = [...cleaned].filter((c) => c === "," || c === ".").length;
+  const decimalPart = cleaned.slice(decimalIndex + 1).replace(/[.,]/g, "");
+
+  // A single separator followed by 3 digits is treated as thousands separator.
+  // Mixed separators use the last one as decimal separator (e.g. 1.234,56).
+  if (separators === 1 && decimalPart.length === 3) {
+    const value = Number.parseFloat(cleaned.replace(/[.,]/g, ""));
+    return Number.isFinite(value) ? value : null;
+  }
+
+  const integerPart = cleaned.slice(0, decimalIndex).replace(/[.,]/g, "");
+  const normalized = decimalPart ? `${integerPart}.${decimalPart}` : integerPart;
   const value = Number.parseFloat(normalized);
   return Number.isFinite(value) ? value : null;
 }
@@ -74,7 +110,9 @@ function dedupeTexts(nodes: AccessibilityNodeSnapshot[]): AccessibilityNodeSnaps
 
 function extractMoney(nodes: AccessibilityNodeSnapshot[]): ParsedMoney[] {
   const results: ParsedMoney[] = [];
-  const re = /R\$\s*([0-9]{1,5}(?:\.[0-9]{3})*(?:,[0-9]{1,2})?)/gi;
+  // Accept normal R$, plus common OCR substitutions RS/R5, and comma/dot decimals.
+  const re = /(?:R\$|RS|R5)\s*([0-9]{1,6}(?:[.,][0-9]{1,3})?)/gi;
+
   for (const n of nodes) {
     const text = n.text ?? "";
     let m: RegExpExecArray | null;
@@ -83,12 +121,13 @@ function extractMoney(nodes: AccessibilityNodeSnapshot[]): ParsedMoney[] {
       const value = parseDecimal(m[1]);
       if (value == null) continue;
       const ctx = text;
+      const plusMoney = /\+\s*(?:R\$|RS|R5)/i.test(ctx);
       results.push({
         value,
         raw: m[0],
         isRatePerKm: RATE_HINTS.some((h) => h.test(ctx)),
         isTariffLike: TARIFF_HINTS.some((h) => h.test(ctx)),
-        isBonusLike: BONUS_HINTS.some((h) => h.test(ctx)),
+        isBonusLike: plusMoney || BONUS_HINTS.some((h) => h.test(ctx)),
         isBalanceLike: /saldo|ganhos|promo/i.test(ctx),
         top: nodeTop(n),
         left: nodeLeft(n)
@@ -105,6 +144,7 @@ function extractMetrics(nodes: AccessibilityNodeSnapshot[]): ParsedMetric[] {
     { re: /([0-9]+(?:[.,][0-9]+)?)\s*m\b/gi, unit: "m" },
     { re: /([0-9]+(?:[.,][0-9]+)?)\s*(?:min|minuto|minutos)\b/gi, unit: "min" }
   ];
+
   for (const n of nodes) {
     const text = n.text ?? "";
     for (const { re, unit } of patterns) {
@@ -147,9 +187,7 @@ function countPositiveMoneyValues(nodes: AccessibilityNodeSnapshot[]): Map<numbe
       money.isTariffLike ||
       money.isBonusLike ||
       money.isBalanceLike
-    ) {
-      continue;
-    }
+    ) continue;
     counts.set(money.value, (counts.get(money.value) ?? 0) + 1);
   }
   return counts;
@@ -160,28 +198,19 @@ function hasUberStructuralSignature(snapshot: AccessibilitySnapshot): boolean {
   const nodes = dedupeTexts(snapshot.nodes ?? []);
   const texts = nodes.map((n) => n.text ?? "").join(" ");
   const moneyCounts = countPositiveMoneyValues(nodes);
-
-  // O fallback estrutural existe somente para a árvore fragmentada observada no
-  // aparelho real. Mantemos o gate deliberadamente conservador: valor total
-  // precisa aparecer em pelo menos 3 bounds distintos e a tela precisa expor
-  // algum elemento interativo, além de duração e fragmento de R$/km.
   const hasRepeatedMoney = [...moneyCounts.values()].some((count) => count >= 3);
   const hasDuration = /\b[0-9]+(?:[.,][0-9]+)?\s*(?:min|minuto|minutos)\b/i.test(texts);
   const hasRateFragment = /\/\s*km\b/i.test(texts);
   const hasInteractiveNode = nodes.some((n) => n.clickable === true);
-
   return hasRepeatedMoney && hasDuration && hasRateFragment && hasInteractiveNode;
 }
 
 export function isOfferSnapshot(snapshot: AccessibilitySnapshot): boolean {
   const nodes = snapshot.nodes ?? [];
   const texts = nodes.map((n) => n.text ?? "").join(" ");
-  const hasMoney = /R\$\s*[1-9]/.test(texts) || /R\$\s*0*[1-9]/.test(texts);
+  const hasMoney = /(?:R\$|RS|R5)\s*[1-9]/i.test(texts) || /(?:R\$|RS|R5)\s*0*[1-9]/i.test(texts);
   const hasMarker = OFFER_MARKERS.some((m) => m.test(texts));
-  const hasClickableAccept = nodes.some(
-    (n) => n.clickable && /aceitar/i.test(n.text ?? "")
-  );
-
+  const hasClickableAccept = nodes.some((n) => n.clickable && /aceitar/i.test(n.text ?? ""));
   if (!hasMoney) return false;
   return hasMarker || hasClickableAccept || hasUberStructuralSignature(snapshot);
 }
@@ -213,8 +242,6 @@ function pickOfferAmount(
     return { amount, confidencePenalty: group.length > 1 ? 0.02 : 0 };
   }
 
-  // Fora do fallback estrutural específico da Uber, continuamos conservadores:
-  // múltiplos valores monetários plausíveis significam "não adivinhar".
   if (!allowFrequencyFallback) return null;
 
   const ranked = [...groups.entries()].sort((a, b) => b[1].length - a[1].length);
@@ -222,10 +249,6 @@ function pickOfferAmount(
   const runnerUpCount = ranked[1]?.[1].length ?? 0;
   const maxCandidateAmount = Math.max(...groups.keys());
 
-  // Para a árvore fragmentada da Uber, frequência só é evidência quando:
-  // 1) há dominância estrita; 2) o valor aparece pelo menos 3 vezes; e
-  // 3) o vencedor também é o maior valor monetário limpo disponível.
-  // Isso evita que um R$/km fragmentado e repetido (ex.: R$ 3,73) vença o total.
   if (
     winnerGroup.length >= minimumWinnerCount &&
     winnerGroup.length > runnerUpCount &&
@@ -233,7 +256,6 @@ function pickOfferAmount(
   ) {
     return { amount: winnerAmount, confidencePenalty: 0.08 };
   }
-
   return null;
 }
 
@@ -313,14 +335,12 @@ function pairLegs(metrics: ParsedMetric[]): {
 
   const p0 = pairs[0];
   const p1 = pairs[1];
-  const ambiguous = pairs.length > 2;
-
   return {
     pickupDurationMinutes: Number.isFinite(p0.min) ? p0.min : null,
     pickupDistanceKm: Number.isFinite(p0.km) ? p0.km : null,
     tripDurationMinutes: Number.isFinite(p1.min) ? p1.min : null,
     tripDistanceKm: Number.isFinite(p1.km) ? p1.km : null,
-    ambiguous
+    ambiguous: pairs.length > 2
   };
 }
 
@@ -348,8 +368,9 @@ export function parseAccessibilitySnapshot(snapshot: AccessibilitySnapshot): Raw
   if (!amountPick || amountPick.amount <= 0) return null;
 
   const legs = pairLegs(metrics);
+  const isOcrSnapshot = nodes.some((n) => n.origin === "screenshotOcr");
 
-  let confidence = 0.72;
+  let confidence = isOcrSnapshot ? 0.78 : 0.72;
   confidence -= amountPick.confidencePenalty;
   if (legs.ambiguous) confidence -= 0.2;
   if (legs.pickupDistanceKm == null && legs.tripDistanceKm == null) confidence -= 0.15;
