@@ -28,6 +28,39 @@ describe("NotificationOfferParser", () => {
     expect(normalized.totalExpectedDurationMinutes).toBe(43);
   });
 
+  it("usa EXTRA_TEXT_LINES sanitizado como fonte prioritária para Uber", () => {
+    const raw = parseRideNotification({
+      packageName: "com.ubercab.driver",
+      appLabel: "Uber Driver",
+      title: "Nova solicitação",
+      text: null,
+      textLines: ["R$ 32,70", "2,4 km", "6 min", "11,8 km", "24 min"],
+      hasTextLines: true,
+      hasExtendedContent: true
+    });
+
+    expect(raw).toMatchObject({
+      platform: "uber",
+      offeredAmount: "R$ 32,70",
+      pickupDistanceKm: 2.4,
+      pickupDurationMinutes: 6,
+      tripDistanceKm: 11.8,
+      tripDurationMinutes: 24,
+      captureSource: "notification"
+    });
+    expect(raw?.extractionConfidence).toBeGreaterThanOrEqual(0.9);
+  });
+
+  it("não inventa oferta quando extras estendidos existem sem fragmento operacional", () => {
+    expect(parseRideNotification({
+      packageName: "com.ubercab.driver",
+      appLabel: "Uber Driver",
+      hasExtendedContent: true,
+      hasTextLines: true,
+      textLines: []
+    })).toBeNull();
+  });
+
   it("usa métrica única como total esperado", () => {
     const raw = parseRideNotification({
       packageName: "com.taxis99.driver",
