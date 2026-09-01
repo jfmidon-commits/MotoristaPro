@@ -27,7 +27,7 @@ on:
 
 jobs:
   build-apk:
-    if: github.event_name != 'pull_request' || github.head_ref != 'feature/ride-accessibility-capture'
+    if: true
     runs-on: ubuntu-latest
     timeout-minutes: 45
 
