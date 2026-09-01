@@ -54,16 +54,23 @@ function snapshotPreview(snapshot: AccessibilitySnapshot): string[] {
     const text = (node.text ?? "").trim().replace(/\s+/g, " ");
     const viewId = (node.viewId ?? "").trim();
     const className = (node.className ?? "").trim();
+    const origin = (node.origin ?? "").trim();
+    const windowId = node.windowId;
     const bounds = `[${node.left ?? "?"},${node.top ?? "?"} → ${node.right ?? "?"},${node.bottom ?? "?"}]`;
     const interactive = node.clickable ? " • clicável" : "";
+    const source = [
+      origin ? `origem:${origin}` : null,
+      windowId != null ? `janela:${windowId}` : null
+    ].filter(Boolean).join(" • ");
 
     let line = "";
     if (text) {
-      line = `${text}  ${bounds}${interactive}`;
-    } else if (viewId || className || node.clickable) {
+      line = `${text}  ${bounds}${interactive}${source ? ` • ${source}` : ""}`;
+    } else if (viewId || className || node.clickable || source) {
       const structural = [
         viewId ? `id:${viewId}` : null,
-        className ? `class:${className}` : null
+        className ? `class:${className}` : null,
+        source || null
       ].filter(Boolean).join(" • ");
       line = `[sem texto] ${structural || "nó estrutural"}  ${bounds}${interactive}`;
     } else {
@@ -74,7 +81,7 @@ function snapshotPreview(snapshot: AccessibilitySnapshot): string[] {
     if (seen.has(key)) continue;
     seen.add(key);
     lines.push(line);
-    if (lines.length >= 18) break;
+    if (lines.length >= 24) break;
   }
 
   return lines;
@@ -85,13 +92,26 @@ export default function NotificationCaptureScreen() {
   const [a11yStatus, setA11yStatus] = useState<NativeNotificationPermissionStatus>("unavailable");
   const [notifications, setNotifications] = useState<CapturedRideNotification[]>([]);
   const [snapshots, setSnapshots] = useState<AccessibilitySnapshot[]>([]);
+  const [refreshing, setRefreshing] = useState(false);
+  const [lastUpdatedAt, setLastUpdatedAt] = useState<number | null>(null);
 
   const load = useCallback(() => {
     setStatus(getNotificationAccessStatus());
     setA11yStatus(getAccessibilityAccessStatus());
     setNotifications(getPendingRideNotifications());
     setSnapshots(getPendingAccessibilitySnapshots());
+    setLastUpdatedAt(Date.now());
   }, []);
+
+  const refreshDiagnostic = useCallback(() => {
+    if (refreshing) return;
+    setRefreshing(true);
+    load();
+    setTimeout(() => {
+      load();
+      setRefreshing(false);
+    }, 450);
+  }, [load, refreshing]);
 
   useFocusEffect(useCallback(() => {
     load();
@@ -141,6 +161,7 @@ export default function NotificationCaptureScreen() {
         <View style={styles.statusCard}>
           <Text style={styles.statusTitle}>Acessibilidade: {permissionLabel(a11yStatus)}</Text>
           <Text style={styles.statusText}>{snapshots.length} snapshot(s) sanitizado(s) na fila local.</Text>
+          <Text style={styles.statusText}>Última leitura da tela: {formatCapturedAt(lastUpdatedAt)}</Text>
         </View>
 
         <Pressable style={styles.primaryButton} onPress={() => openNotificationAccessSettings()}>
@@ -149,8 +170,8 @@ export default function NotificationCaptureScreen() {
         <Pressable style={styles.primaryButton} onPress={() => openAccessibilitySettings()}>
           <Text style={styles.primaryButtonText}>Abrir configurações de acessibilidade</Text>
         </Pressable>
-        <Pressable style={styles.secondaryButton} onPress={load}>
-          <Text style={styles.secondaryButtonText}>Atualizar diagnóstico</Text>
+        <Pressable style={styles.secondaryButton} onPress={refreshDiagnostic} disabled={refreshing}>
+          <Text style={styles.secondaryButtonText}>{refreshing ? "Atualizando..." : "Atualizar diagnóstico"}</Text>
         </Pressable>
         <Pressable
           style={styles.secondaryButton}
@@ -182,7 +203,7 @@ export default function NotificationCaptureScreen() {
 
         <Text style={styles.sectionTitle}>Diagnóstico dos snapshots</Text>
         <Text style={styles.diagnosticHint}>
-          Mostra somente conteúdo sanitizado e metadados estruturais locais (classe, viewId, bounds e clicável). Nenhum texto bruto adicional é persistido por esta tela.
+          Mostra somente conteúdo sanitizado e metadados estruturais locais (classe, viewId, bounds, janela, origem e clicável). Nenhum texto bruto adicional é persistido por esta tela.
         </Text>
         {latestSnapshots.length === 0 ? (
           <Text style={styles.empty}>Nenhum snapshot capturado ainda.</Text>
@@ -199,6 +220,9 @@ export default function NotificationCaptureScreen() {
                   {formatCapturedAt(snapshot.capturedAt)} • {snapshot.nodeCount ?? snapshot.nodes?.length ?? 0} nodes
                   {snapshot.truncated ? " • truncado" : ""}
                 </Text>
+                {snapshot.origins?.length ? (
+                  <Text style={styles.snapshotMeta}>origens: {snapshot.origins.join(", ")}</Text>
+                ) : null}
                 <Text style={[styles.parserBadge, raw ? styles.parserOk : styles.parserMiss]}>
                   {raw ? "PARSER: OFERTA RECONHECIDA" : "PARSER: NÃO RECONHECEU"}
                 </Text>
