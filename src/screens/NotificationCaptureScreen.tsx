@@ -49,17 +49,34 @@ function formatRawAmount(value?: number | string | null): string {
 function snapshotPreview(snapshot: AccessibilitySnapshot): string[] {
   const seen = new Set<string>();
   const lines: string[] = [];
+
   for (const node of snapshot.nodes ?? []) {
     const text = (node.text ?? "").trim().replace(/\s+/g, " ");
-    if (!text) continue;
-    const key = `${text.toLowerCase()}@${node.left ?? 0},${node.top ?? 0},${node.right ?? 0},${node.bottom ?? 0}`;
+    const viewId = (node.viewId ?? "").trim();
+    const className = (node.className ?? "").trim();
+    const bounds = `[${node.left ?? "?"},${node.top ?? "?"} → ${node.right ?? "?"},${node.bottom ?? "?"}]`;
+    const interactive = node.clickable ? " • clicável" : "";
+
+    let line = "";
+    if (text) {
+      line = `${text}  ${bounds}${interactive}`;
+    } else if (viewId || className || node.clickable) {
+      const structural = [
+        viewId ? `id:${viewId}` : null,
+        className ? `class:${className}` : null
+      ].filter(Boolean).join(" • ");
+      line = `[sem texto] ${structural || "nó estrutural"}  ${bounds}${interactive}`;
+    } else {
+      continue;
+    }
+
+    const key = line.toLowerCase();
     if (seen.has(key)) continue;
     seen.add(key);
-    lines.push(
-      `${text}  [${node.left ?? "?"},${node.top ?? "?"} → ${node.right ?? "?"},${node.bottom ?? "?"}]${node.clickable ? " • clicável" : ""}`
-    );
+    lines.push(line);
     if (lines.length >= 18) break;
   }
+
   return lines;
 }
 
@@ -165,7 +182,7 @@ export default function NotificationCaptureScreen() {
 
         <Text style={styles.sectionTitle}>Diagnóstico dos snapshots</Text>
         <Text style={styles.diagnosticHint}>
-          Mostra somente o conteúdo já sanitizado e mantido localmente. Use esta área para confirmar o que Uber/99 realmente expuseram ao serviço de acessibilidade.
+          Mostra somente conteúdo sanitizado e metadados estruturais locais (classe, viewId, bounds e clicável). Nenhum texto bruto adicional é persistido por esta tela.
         </Text>
         {latestSnapshots.length === 0 ? (
           <Text style={styles.empty}>Nenhum snapshot capturado ainda.</Text>
@@ -191,7 +208,7 @@ export default function NotificationCaptureScreen() {
                   </Text>
                 ) : null}
                 {preview.length === 0 ? (
-                  <Text style={styles.empty}>Snapshot sem texto operacional persistido.</Text>
+                  <Text style={styles.empty}>Snapshot sem texto operacional nem metadado estrutural útil.</Text>
                 ) : (
                   preview.map((line, lineIndex) => (
                     <Text key={`${index}-${lineIndex}`} style={styles.snapshotLine}>{line}</Text>
