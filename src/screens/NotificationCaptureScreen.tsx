@@ -19,6 +19,7 @@ import { parseRideNotification } from "@/services/NotificationOfferParser";
 import { parseAccessibilitySnapshot } from "@/services/AccessibilityOfferParser";
 import { assessUberStructuralOffer } from "@/services/AccessibilityStructuralDiagnostics";
 import { normalizeRideOffer } from "@/services/RideOfferNormalizer";
+import { calculateOfferEconomics, classifyOffer, dedupeOffers } from "@/services/RideOfferDecision";
 
 function permissionLabel(status: NativeNotificationPermissionStatus): string {
   if (status === "granted") return "Acesso autorizado";
@@ -45,6 +46,18 @@ function formatRawAmount(value?: number | string | null): string {
     return Number.isFinite(value) ? value.toFixed(2).replace(".", ",") : "—";
   }
   return value.trim() || "—";
+}
+
+function formatMoneyMetric(value: number | null, suffix: string): string {
+  if (value == null || !Number.isFinite(value)) return "—";
+  return `R$ ${value.toFixed(2).replace(".", ",")}${suffix}`;
+}
+
+function semaphoreGlyph(value: ReturnType<typeof classifyOffer>): string {
+  if (value === "green") return "🟢";
+  if (value === "yellow") return "🟡";
+  if (value === "red") return "🔴";
+  return "⚪";
 }
 
 function snapshotPreview(snapshot: AccessibilitySnapshot): string[] {
@@ -154,7 +167,7 @@ export default function NotificationCaptureScreen() {
     .slice()
     .reverse();
 
-  const parsed = [...parsedA11y, ...parsedNotifications];
+  const parsed = dedupeOffers([...parsedA11y, ...parsedNotifications]);
   const latestNotifications = notifications.slice().reverse().slice(0, 5);
   const latestSnapshots = snapshots.slice().reverse().slice(0, 5);
 
@@ -208,17 +221,29 @@ export default function NotificationCaptureScreen() {
         {parsed.length === 0 ? (
           <Text style={styles.empty}>Ainda não há oferta reconhecida. Depois de autorizar, deixe Uber/99/inDrive emitirem uma oferta e volte aqui quando estiver parado.</Text>
         ) : (
-          parsed.map((offer, index) => (
-            <View key={`${offer.capturedAtIso}-${index}`} style={styles.offerCard}>
-              <Text style={styles.offerTitle}>{offer.platform.toUpperCase()} • R$ {(offer.offeredAmountCents / 100).toFixed(2).replace(".", ",")} • {offer.captureSource}</Text>
-              <Text style={styles.offerText}>
-                {offer.totalExpectedDistanceKm != null ? `${offer.totalExpectedDistanceKm.toFixed(1)} km` : "km —"}
-                {" • "}
-                {offer.totalExpectedDurationMinutes != null ? `${offer.totalExpectedDurationMinutes.toFixed(0)} min` : "tempo —"}
-                {" • confiança "}{Math.round((offer.extractionConfidence ?? 0) * 100)}%
-              </Text>
-            </View>
-          ))
+          parsed.map((offer, index) => {
+            const economics = calculateOfferEconomics(offer);
+            const semaphore = classifyOffer(offer, null);
+            return (
+              <View key={`${offer.capturedAtIso}-${index}`} style={styles.offerCard}>
+                <Text style={styles.offerTitle}>
+                  {offer.platform.toUpperCase()} • R$ {(offer.offeredAmountCents / 100).toFixed(2).replace(".", ",")}
+                  {offer.category ? ` • ${offer.category}` : ""}
+                </Text>
+                <Text style={styles.offerText}>
+                  TOTAL {offer.totalExpectedDistanceKm != null ? `${offer.totalExpectedDistanceKm.toFixed(1)} km` : "km —"}
+                  {" • "}
+                  {offer.totalExpectedDurationMinutes != null ? `${offer.totalExpectedDurationMinutes.toFixed(0)} min` : "tempo —"}
+                </Text>
+                <Text style={styles.offerMetrics}>
+                  {formatMoneyMetric(economics.reaisPerKm, "/km")} • {formatMoneyMetric(economics.reaisPerHour, "/h")} • {semaphoreGlyph(semaphore)}
+                </Text>
+                <Text style={styles.offerMeta}>
+                  semáforo aguardando suas metas • {offer.captureSource}
+                </Text>
+              </View>
+            );
+          })
         )}
 
         <Text style={styles.sectionTitle}>Diagnóstico das notificações</Text>
@@ -332,7 +357,9 @@ const styles = StyleSheet.create({
   empty: { color: "#94A3B8", lineHeight: 20 },
   offerCard: { backgroundColor: "#1E293B", borderRadius: 12, padding: 14, marginBottom: 10 },
   offerTitle: { color: "#fff", fontWeight: "900" },
-  offerText: { color: "#94A3B8", marginTop: 5 },
+  offerText: { color: "#E2E8F0", marginTop: 7, fontWeight: "800" },
+  offerMetrics: { color: "#F8FAFC", marginTop: 7, fontSize: 16, fontWeight: "900" },
+  offerMeta: { color: "#94A3B8", marginTop: 5, fontSize: 12 },
   diagnosticHint: { color: "#94A3B8", fontSize: 13, lineHeight: 18, marginBottom: 10 },
   snapshotCard: { backgroundColor: "#111827", borderRadius: 12, padding: 14, marginBottom: 12, borderWidth: 1, borderColor: "#334155" },
   snapshotTitle: { color: "#F8FAFC", fontWeight: "900", fontSize: 14 },
