@@ -22,5 +22,18 @@
         android:name="android.accessibilityservice"
         android:resource="@xml/motorista_accessibility_service" />
     </service>
+
+    <service
+      android:name=".UberScreenshotProbeAccessibilityService"
+      android:label="MotoristaPro — probe de screenshot"
+      android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE"
+      android:exported="true">
+      <intent-filter>
+        <action android:name="android.accessibilityservice.AccessibilityService" />
+      </intent-filter>
+      <meta-data
+        android:name="android.accessibilityservice"
+        android:resource="@xml/motorista_screenshot_probe_accessibility_service" />
+    </service>
   </application>
 </manifest>
