@@ -18,5 +18,15 @@ export interface RideNotificationPayload {
   text?: string | null;
   bigText?: string | null;
   subText?: string | null;
+  summaryText?: string | null;
+  infoText?: string | null;
+  bigContentTitle?: string | null;
+  tickerText?: string | null;
+  textLines?: string[] | null;
+  hasBasicContent?: boolean | null;
+  hasExtendedContent?: boolean | null;
+  hasOperationalContent?: boolean | null;
+  hasTextLines?: boolean | null;
+  hasMessages?: boolean | null;
   postedAt?: number | string | Date | null;
 }
