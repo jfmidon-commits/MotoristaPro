@@ -141,7 +141,15 @@ function detectPlatform(packageName: string): RidePlatform | null {
 function countPositiveMoneyValues(nodes: AccessibilityNodeSnapshot[]): Map<number, number> {
   const counts = new Map<number, number>();
   for (const money of extractMoney(nodes)) {
-    if (money.value <= 0 || money.isTariffLike || money.isBonusLike || money.isBalanceLike) continue;
+    if (
+      money.value <= 0 ||
+      money.isRatePerKm ||
+      money.isTariffLike ||
+      money.isBonusLike ||
+      money.isBalanceLike
+    ) {
+      continue;
+    }
     counts.set(money.value, (counts.get(money.value) ?? 0) + 1);
   }
   return counts;
@@ -152,10 +160,17 @@ function hasUberStructuralSignature(snapshot: AccessibilitySnapshot): boolean {
   const nodes = dedupeTexts(snapshot.nodes ?? []);
   const texts = nodes.map((n) => n.text ?? "").join(" ");
   const moneyCounts = countPositiveMoneyValues(nodes);
-  const hasRepeatedMoney = [...moneyCounts.values()].some((count) => count >= 2);
+
+  // O fallback estrutural existe somente para a árvore fragmentada observada no
+  // aparelho real. Mantemos o gate deliberadamente conservador: valor total
+  // precisa aparecer em pelo menos 3 bounds distintos e a tela precisa expor
+  // algum elemento interativo, além de duração e fragmento de R$/km.
+  const hasRepeatedMoney = [...moneyCounts.values()].some((count) => count >= 3);
   const hasDuration = /\b[0-9]+(?:[.,][0-9]+)?\s*(?:min|minuto|minutos)\b/i.test(texts);
   const hasRateFragment = /\/\s*km\b/i.test(texts);
-  return hasRepeatedMoney && hasDuration && hasRateFragment;
+  const hasInteractiveNode = nodes.some((n) => n.clickable === true);
+
+  return hasRepeatedMoney && hasDuration && hasRateFragment && hasInteractiveNode;
 }
 
 export function isOfferSnapshot(snapshot: AccessibilitySnapshot): boolean {
@@ -171,7 +186,11 @@ export function isOfferSnapshot(snapshot: AccessibilitySnapshot): boolean {
   return hasMarker || hasClickableAccept || hasUberStructuralSignature(snapshot);
 }
 
-function pickOfferAmount(moneys: ParsedMoney[]): { amount: number; confidencePenalty: number } | null {
+function pickOfferAmount(
+  moneys: ParsedMoney[],
+  allowFrequencyFallback = false,
+  minimumWinnerCount = 3
+): { amount: number; confidencePenalty: number } | null {
   const candidates = moneys.filter(
     (m) =>
       m.value > 0 &&
@@ -194,14 +213,24 @@ function pickOfferAmount(moneys: ParsedMoney[]): { amount: number; confidencePen
     return { amount, confidencePenalty: group.length > 1 ? 0.02 : 0 };
   }
 
-  const ranked = [...groups.entries()].sort((a, b) => b[1].length - a[1].length || b[0] - a[0]);
+  // Fora do fallback estrutural específico da Uber, continuamos conservadores:
+  // múltiplos valores monetários plausíveis significam "não adivinhar".
+  if (!allowFrequencyFallback) return null;
+
+  const ranked = [...groups.entries()].sort((a, b) => b[1].length - a[1].length);
   const [winnerAmount, winnerGroup] = ranked[0];
   const runnerUpCount = ranked[1]?.[1].length ?? 0;
+  const maxCandidateAmount = Math.max(...groups.keys());
 
-  // Árvores reais do Uber podem repetir o valor total em vários nós/bounds,
-  // enquanto um valor secundário (ex.: R$/km separado do sufixo "/ km") aparece uma vez.
-  // Só aceitamos a frequência como desempate quando há vencedor inequívoco e repetido.
-  if (winnerGroup.length >= 2 && winnerGroup.length > runnerUpCount) {
+  // Para a árvore fragmentada da Uber, frequência só é evidência quando:
+  // 1) há dominância estrita; 2) o valor aparece pelo menos 3 vezes; e
+  // 3) o vencedor também é o maior valor monetário limpo disponível.
+  // Isso evita que um R$/km fragmentado e repetido (ex.: R$ 3,73) vença o total.
+  if (
+    winnerGroup.length >= minimumWinnerCount &&
+    winnerGroup.length > runnerUpCount &&
+    winnerAmount === maxCandidateAmount
+  ) {
     return { amount: winnerAmount, confidencePenalty: 0.08 };
   }
 
@@ -313,8 +342,9 @@ export function parseAccessibilitySnapshot(snapshot: AccessibilitySnapshot): Raw
   const allText = nodes.map((n) => n.text ?? "").join(" ");
   const moneys = extractMoney(nodes);
   const metrics = extractMetrics(nodes);
+  const structuralUberFallback = platform === "uber" && hasUberStructuralSignature(snapshot);
 
-  const amountPick = pickOfferAmount(moneys);
+  const amountPick = pickOfferAmount(moneys, structuralUberFallback, 3);
   if (!amountPick || amountPick.amount <= 0) return null;
 
   const legs = pairLegs(metrics);
@@ -325,7 +355,7 @@ export function parseAccessibilitySnapshot(snapshot: AccessibilitySnapshot): Raw
   if (legs.pickupDistanceKm == null && legs.tripDistanceKm == null) confidence -= 0.15;
   if (legs.pickupDurationMinutes == null && legs.tripDurationMinutes == null) confidence -= 0.1;
   if (!OFFER_MARKERS.some((m) => m.test(allText))) confidence -= 0.08;
-  if (hasUberStructuralSignature(snapshot) && !OFFER_MARKERS.some((m) => m.test(allText))) confidence -= 0.04;
+  if (structuralUberFallback && !OFFER_MARKERS.some((m) => m.test(allText))) confidence -= 0.04;
   confidence = Math.max(0.15, Math.min(0.95, confidence));
 
   const hasAnyLeg =
