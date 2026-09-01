@@ -20,3 +20,8 @@ android {
     versionName "0.1.0"
   }
 }
+
+dependencies {
+  // Bundled Latin OCR model: works immediately/offline after install.
+  implementation 'com.google.mlkit:text-recognition:16.0.1'
+}
