@@ -106,14 +106,15 @@ class RideAccessibilityService : AccessibilityService() {
     // Leading capture: never wait for the event storm to stop before taking the first sample.
     val previousCapture = lastCaptureAt.get()
     if (now - previousCapture >= LEADING_CAPTURE_INTERVAL_MS && lastCaptureAt.compareAndSet(previousCapture, now)) {
-      captureSnapshot(packageName, eventType, eventSignal)
+      val source = try { event.source } catch (_: Exception) { null }
+      captureSnapshot(packageName, eventType, eventSignal, source)
     }
 
     // Trailing capture: also sample the settled state after the UI animation/event storm.
     trailingRunnable?.let { mainHandler.removeCallbacks(it) }
     val runnable = Runnable {
       lastCaptureAt.set(System.currentTimeMillis())
-      captureSnapshot(packageName, eventType, eventSignal)
+      captureSnapshot(packageName, eventType, eventSignal, null)
     }
     trailingRunnable = runnable
     mainHandler.postDelayed(runnable, TRAILING_CAPTURE_MS)
@@ -156,7 +157,12 @@ class RideAccessibilityService : AccessibilityService() {
     }
   }
 
-  private fun captureSnapshot(packageName: String, eventType: Int, eventSignal: JSONObject) {
+  private fun captureSnapshot(
+    packageName: String,
+    eventType: Int,
+    eventSignal: JSONObject,
+    eventSource: AccessibilityNodeInfo?
+  ) {
     val nodes = JSONArray()
     val seenTexts = HashSet<String>()
     val seenNodes = HashSet<String>()
@@ -165,20 +171,28 @@ class RideAccessibilityService : AccessibilityService() {
 
     appendEventSignal(eventSignal, nodes, seenTexts, seenNodes, counter, capturedOrigins)
 
-    var source: AccessibilityNodeInfo? = null
+    var source = eventSource
     try {
-      source = try {
-        // event.source may already be stale; the event signal above is still retained.
-        // Source is re-read from the latest event only when available through active state.
-        null
-      } catch (_: Exception) {
-        null
+      if (source != null && belongsToPackage(source, packageName)) {
+        traverse(
+          source,
+          0,
+          nodes,
+          seenTexts,
+          seenNodes,
+          counter,
+          origin = "eventSource",
+          windowId = safeWindowId(source)
+        )
+        capturedOrigins.add("eventSource")
       }
+    } catch (_: Exception) {
     } finally {
       try {
         source?.recycle()
       } catch (_: Exception) {
       }
+      source = null
     }
 
     var activeRoot: AccessibilityNodeInfo? = null
@@ -205,7 +219,7 @@ class RideAccessibilityService : AccessibilityService() {
       }
     }
 
-    // Important: ride offer cards can live in another interactive window/overlay.
+    // Ride offer cards can live in another interactive window/overlay.
     try {
       for (window in windows.orEmpty()) {
         if (counter[0] >= MAX_NODES) break
