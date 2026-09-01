@@ -47,6 +47,39 @@ describe("AccessibilityOfferParser", () => {
     });
   });
 
+  it("reconhece assinatura fragmentada observada no aparelho real da Uber", () => {
+    const s = snap("com.ubercab.driver", [
+      node("50min", -609, 64, { clickable: true }),
+      node("50min", -1122, 910),
+      node("R$ 51,61", -797, 148),
+      node("R$ 51,61", -797, 486),
+      node("R$ 3,73", -797, 822),
+      node("R$ 51,61", -52, 127),
+      node("R$ 51,61", 60, 127),
+      node("R$ 0,00", 60, 834),
+      node("/ km", 497, 664),
+      node("/ km", 789, 108)
+    ]);
+
+    expect(isOfferSnapshot(s)).toBe(true);
+    const raw = parseAccessibilitySnapshot(s);
+    expect(raw).not.toBeNull();
+    expect(raw!.platform).toBe("uber");
+    expect(raw!.offeredAmount).toBe(51.61);
+    expect(raw!.pickupDurationMinutes).toBe(50);
+    expect(raw!.extractionConfidence).toBeGreaterThanOrEqual(0.15);
+  });
+
+  it("não usa frequência se dois valores monetários repetidos empatam", () => {
+    const result = __test.pickOfferAmount([
+      { value: 20, raw: "R$ 20,00", isRatePerKm: false, isTariffLike: false, isBonusLike: false, isBalanceLike: false, top: 10, left: 10 },
+      { value: 20, raw: "R$ 20,00", isRatePerKm: false, isTariffLike: false, isBonusLike: false, isBalanceLike: false, top: 20, left: 10 },
+      { value: 30, raw: "R$ 30,00", isRatePerKm: false, isTariffLike: false, isBonusLike: false, isBalanceLike: false, top: 30, left: 10 },
+      { value: 30, raw: "R$ 30,00", isRatePerKm: false, isTariffLike: false, isBonusLike: false, isBalanceLike: false, top: 40, left: 10 }
+    ]);
+    expect(result).toBeNull();
+  });
+
   it("extrai 99 canônica sem somar tarifas", () => {
     const s = snap("com.app99.driver", [
       node("R$ 20,03", 10, 20), node("R$ 1,92/km", 40, 20), node("2 min", 90, 10), node("176 m", 90, 80),
