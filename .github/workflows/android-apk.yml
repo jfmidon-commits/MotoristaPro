@@ -28,6 +28,7 @@ on:
 
 jobs:
   build-apk:
+    # Experimental branch is allowed on push so we spend exactly one build for the screenshot probe.
     if: github.event_name != 'pull_request' || (github.head_ref != 'feature/ride-accessibility-capture' && github.head_ref != 'experiment/ride-accessibility-screenshot-ocr')
     runs-on: ubuntu-latest
     timeout-minutes: 45
