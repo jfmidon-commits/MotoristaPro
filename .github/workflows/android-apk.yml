@@ -5,6 +5,7 @@ on:
   push:
     branches:
       - stabilize/offline-sync
+      - experiment/ride-accessibility-screenshot-ocr
     paths:
       - "src/**"
       - "modules/**"
