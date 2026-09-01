@@ -6,10 +6,21 @@ export interface CapturedRideNotification {
   packageName: string;
   notificationKey?: string | null;
   postedAt?: number | null;
+  appLabel?: string | null;
   title?: string | null;
   text?: string | null;
   bigText?: string | null;
   subText?: string | null;
+  summaryText?: string | null;
+  infoText?: string | null;
+  bigContentTitle?: string | null;
+  tickerText?: string | null;
+  textLines?: string[];
+  hasBasicContent?: boolean | null;
+  hasExtendedContent?: boolean | null;
+  hasOperationalContent?: boolean | null;
+  hasTextLines?: boolean | null;
+  hasMessages?: boolean | null;
 }
 
 export interface AccessibilityNodeSnapshot {
