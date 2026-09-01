@@ -19,7 +19,8 @@ import java.util.concurrent.atomic.AtomicReference
  * Coexists with RideNotificationListenerService.
  *
  * Privacy: does not persist raw PII (names, full addresses, free-form notes).
- * Performance: package/event allowlist, debounce, depth/node/char caps, background persist.
+ * Performance: package/event allowlist, leading+trailing capture, depth/node/char caps,
+ * background persistence and fingerprint dedupe.
  */
 class RideAccessibilityService : AccessibilityService() {
 
@@ -37,10 +38,11 @@ class RideAccessibilityService : AccessibilityService() {
     )
 
     private const val MAX_DEPTH = 18
-    private const val MAX_NODES = 120
+    private const val MAX_NODES = 160
     private const val MAX_CHARS_PER_TEXT = 80
-    private const val MAX_SNAPSHOT_BYTES = 12_000
-    private const val DEBOUNCE_MS = 350L
+    private const val MAX_SNAPSHOT_BYTES = 14_000
+    private const val LEADING_CAPTURE_INTERVAL_MS = 300L
+    private const val TRAILING_CAPTURE_MS = 420L
     private const val FINGERPRINT_TTL_MS = 4_000L
 
     private val OPERATIONAL_FRAGMENT_PATTERNS = listOf(
@@ -60,8 +62,8 @@ class RideAccessibilityService : AccessibilityService() {
   private val persistExecutor: ExecutorService = Executors.newSingleThreadExecutor()
   private val lastFingerprint = AtomicReference<String?>(null)
   private val lastFingerprintAt = AtomicLong(0L)
-  private val lastEventAt = AtomicLong(0L)
-  private var debounceRunnable: Runnable? = null
+  private val lastCaptureAt = AtomicLong(0L)
+  private var trailingRunnable: Runnable? = null
 
   override fun onServiceConnected() {
     super.onServiceConnected()
@@ -71,7 +73,7 @@ class RideAccessibilityService : AccessibilityService() {
           AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED or
           AccessibilityEvent.TYPE_VIEW_SCROLLED
       feedbackType = AccessibilityServiceInfo.FEEDBACK_GENERIC
-      notificationTimeout = 250
+      notificationTimeout = 120
       flags =
         AccessibilityServiceInfo.FLAG_INCLUDE_NOT_IMPORTANT_VIEWS or
           AccessibilityServiceInfo.FLAG_REPORT_VIEW_IDS or
@@ -82,7 +84,7 @@ class RideAccessibilityService : AccessibilityService() {
           AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED or
           AccessibilityEvent.TYPE_VIEW_SCROLLED
       feedbackType = AccessibilityServiceInfo.FEEDBACK_GENERIC
-      notificationTimeout = 250
+      notificationTimeout = 120
       flags =
         AccessibilityServiceInfo.FLAG_INCLUDE_NOT_IMPORTANT_VIEWS or
           AccessibilityServiceInfo.FLAG_REPORT_VIEW_IDS or
@@ -97,23 +99,30 @@ class RideAccessibilityService : AccessibilityService() {
     val packageName = event.packageName?.toString() ?: return
     if (!isAllowedPackage(packageName)) return
 
+    val eventSignal = buildEventSignal(event)
+    val eventType = event.eventType
     val now = System.currentTimeMillis()
-    lastEventAt.set(now)
 
-    debounceRunnable?.let { mainHandler.removeCallbacks(it) }
-    val runnable = Runnable {
-      if (System.currentTimeMillis() - lastEventAt.get() >= DEBOUNCE_MS - 20) {
-        captureSnapshot(packageName, event.eventType)
-      }
+    // Leading capture: never wait for the event storm to stop before taking the first sample.
+    val previousCapture = lastCaptureAt.get()
+    if (now - previousCapture >= LEADING_CAPTURE_INTERVAL_MS && lastCaptureAt.compareAndSet(previousCapture, now)) {
+      captureSnapshot(packageName, eventType, eventSignal)
     }
-    debounceRunnable = runnable
-    mainHandler.postDelayed(runnable, DEBOUNCE_MS)
+
+    // Trailing capture: also sample the settled state after the UI animation/event storm.
+    trailingRunnable?.let { mainHandler.removeCallbacks(it) }
+    val runnable = Runnable {
+      lastCaptureAt.set(System.currentTimeMillis())
+      captureSnapshot(packageName, eventType, eventSignal)
+    }
+    trailingRunnable = runnable
+    mainHandler.postDelayed(runnable, TRAILING_CAPTURE_MS)
   }
 
   override fun onInterrupt() {}
 
   override fun onDestroy() {
-    debounceRunnable?.let { mainHandler.removeCallbacks(it) }
+    trailingRunnable?.let { mainHandler.removeCallbacks(it) }
     persistExecutor.shutdownNow()
     super.onDestroy()
   }
@@ -122,64 +131,227 @@ class RideAccessibilityService : AccessibilityService() {
     return packageName.lowercase() in ALLOWED_PACKAGES
   }
 
-  private fun captureSnapshot(packageName: String, eventType: Int) {
-    var root: AccessibilityNodeInfo? = null
+  private fun buildEventSignal(event: AccessibilityEvent): JSONObject {
+    val sanitizedTexts = JSONArray()
     try {
-      root = rootInActiveWindow ?: return
-      val nodes = JSONArray()
-      val seenTexts = HashSet<String>()
-      val counter = intArrayOf(0)
-      traverse(root, 0, nodes, seenTexts, counter)
+      event.text
+        .mapNotNull { it?.toString()?.trim() }
+        .filter { it.isNotEmpty() }
+        .forEach { raw -> sanitizeOperationalText(raw)?.let { sanitizedTexts.put(it) } }
+    } catch (_: Exception) {
+    }
 
-      if (nodes.length() == 0) return
+    val sanitizedDescription = try {
+      event.contentDescription?.toString()?.trim()?.let { sanitizeOperationalText(it) }
+    } catch (_: Exception) {
+      null
+    }
 
-      val fingerprint = buildFingerprint(packageName, nodes)
-      val now = System.currentTimeMillis()
-      val prev = lastFingerprint.get()
-      val prevAt = lastFingerprintAt.get()
-      if (fingerprint == prev && now - prevAt < FINGERPRINT_TTL_MS) {
-        return
+    return JSONObject().apply {
+      put("windowId", event.windowId)
+      put("eventType", event.eventType)
+      put("className", event.className?.toString()?.substringAfterLast('.')?.take(40) ?: JSONObject.NULL)
+      put("texts", sanitizedTexts)
+      put("description", sanitizedDescription ?: JSONObject.NULL)
+    }
+  }
+
+  private fun captureSnapshot(packageName: String, eventType: Int, eventSignal: JSONObject) {
+    val nodes = JSONArray()
+    val seenTexts = HashSet<String>()
+    val seenNodes = HashSet<String>()
+    val counter = intArrayOf(0)
+    val capturedOrigins = LinkedHashSet<String>()
+
+    appendEventSignal(eventSignal, nodes, seenTexts, seenNodes, counter, capturedOrigins)
+
+    var source: AccessibilityNodeInfo? = null
+    try {
+      source = try {
+        // event.source may already be stale; the event signal above is still retained.
+        // Source is re-read from the latest event only when available through active state.
+        null
+      } catch (_: Exception) {
+        null
       }
-      lastFingerprint.set(fingerprint)
-      lastFingerprintAt.set(now)
-
-      val snapshot = JSONObject().apply {
-        put("packageName", packageName)
-        put("eventType", eventType)
-        put("capturedAt", now)
-        put("nodeCount", nodes.length())
-        put("nodes", nodes)
-        put("fingerprint", fingerprint)
+    } finally {
+      try {
+        source?.recycle()
+      } catch (_: Exception) {
       }
+    }
 
-      val raw = snapshot.toString()
-      if (raw.length > MAX_SNAPSHOT_BYTES) {
-        val trimmed = JSONArray()
-        var bytes = 0
-        for (i in 0 until nodes.length()) {
-          val n = nodes.optJSONObject(i) ?: continue
-          val s = n.toString()
-          if (bytes + s.length > MAX_SNAPSHOT_BYTES - 200) break
-          trimmed.put(n)
-          bytes += s.length
-        }
-        snapshot.put("nodes", trimmed)
-        snapshot.put("truncated", true)
-      }
-
-      val payload = snapshot.toString()
-      persistExecutor.execute {
-        try {
-          RideAccessibilityStore.append(applicationContext, JSONObject(payload))
-        } catch (_: Exception) {
-        }
+    var activeRoot: AccessibilityNodeInfo? = null
+    try {
+      activeRoot = rootInActiveWindow
+      if (activeRoot != null && belongsToPackage(activeRoot, packageName)) {
+        traverse(
+          activeRoot,
+          0,
+          nodes,
+          seenTexts,
+          seenNodes,
+          counter,
+          origin = "activeRoot",
+          windowId = safeWindowId(activeRoot)
+        )
+        capturedOrigins.add("activeRoot")
       }
     } catch (_: Exception) {
     } finally {
       try {
-        root?.recycle()
+        activeRoot?.recycle()
       } catch (_: Exception) {
       }
+    }
+
+    // Important: ride offer cards can live in another interactive window/overlay.
+    try {
+      for (window in windows.orEmpty()) {
+        if (counter[0] >= MAX_NODES) break
+        var root: AccessibilityNodeInfo? = null
+        try {
+          root = window.root ?: continue
+          if (!belongsToPackage(root, packageName)) continue
+          traverse(
+            root,
+            0,
+            nodes,
+            seenTexts,
+            seenNodes,
+            counter,
+            origin = "window",
+            windowId = window.id
+          )
+          capturedOrigins.add("window:${window.id}")
+        } catch (_: Exception) {
+        } finally {
+          try {
+            root?.recycle()
+          } catch (_: Exception) {
+          }
+        }
+      }
+    } catch (_: Exception) {
+    }
+
+    if (nodes.length() == 0) return
+
+    val fingerprint = buildFingerprint(packageName, nodes)
+    val now = System.currentTimeMillis()
+    val prev = lastFingerprint.get()
+    val prevAt = lastFingerprintAt.get()
+    if (fingerprint == prev && now - prevAt < FINGERPRINT_TTL_MS) {
+      return
+    }
+    lastFingerprint.set(fingerprint)
+    lastFingerprintAt.set(now)
+
+    val snapshot = JSONObject().apply {
+      put("packageName", packageName)
+      put("eventType", eventType)
+      put("capturedAt", now)
+      put("nodeCount", nodes.length())
+      put("nodes", nodes)
+      put("fingerprint", fingerprint)
+      put("origins", JSONArray(capturedOrigins.toList()))
+    }
+
+    val raw = snapshot.toString()
+    if (raw.length > MAX_SNAPSHOT_BYTES) {
+      val trimmed = JSONArray()
+      var bytes = 0
+      for (i in 0 until nodes.length()) {
+        val n = nodes.optJSONObject(i) ?: continue
+        val s = n.toString()
+        if (bytes + s.length > MAX_SNAPSHOT_BYTES - 300) break
+        trimmed.put(n)
+        bytes += s.length
+      }
+      snapshot.put("nodes", trimmed)
+      snapshot.put("truncated", true)
+    }
+
+    val payload = snapshot.toString()
+    persistExecutor.execute {
+      try {
+        RideAccessibilityStore.append(applicationContext, JSONObject(payload))
+      } catch (_: Exception) {
+      }
+    }
+  }
+
+  private fun appendEventSignal(
+    eventSignal: JSONObject,
+    out: JSONArray,
+    seenTexts: MutableSet<String>,
+    seenNodes: MutableSet<String>,
+    counter: IntArray,
+    origins: MutableSet<String>
+  ) {
+    if (counter[0] >= MAX_NODES) return
+
+    val windowId = eventSignal.optInt("windowId", -1)
+    val className = eventSignal.optString("className", "").takeIf { it.isNotBlank() && it != "null" }
+    val texts = eventSignal.optJSONArray("texts") ?: JSONArray()
+    val description = eventSignal.optString("description", "").takeIf { it.isNotBlank() && it != "null" }
+
+    for (i in 0 until texts.length()) {
+      val text = texts.optString(i, "").trim()
+      if (text.isEmpty()) continue
+      appendSyntheticNode(text, className, windowId, "eventText", out, seenTexts, seenNodes, counter)
+      origins.add("eventText")
+    }
+    if (!description.isNullOrBlank()) {
+      appendSyntheticNode(description, className, windowId, "eventDescription", out, seenTexts, seenNodes, counter)
+      origins.add("eventDescription")
+    }
+  }
+
+  private fun appendSyntheticNode(
+    text: String,
+    className: String?,
+    windowId: Int,
+    origin: String,
+    out: JSONArray,
+    seenTexts: MutableSet<String>,
+    seenNodes: MutableSet<String>,
+    counter: IntArray
+  ) {
+    if (counter[0] >= MAX_NODES) return
+    val normalized = normalizeForDedupe(text)
+    val key = "$origin|$windowId|$normalized"
+    if (!seenTexts.add(key) || !seenNodes.add(key)) return
+    counter[0]++
+
+    out.put(JSONObject().apply {
+      put("text", text)
+      put("viewId", JSONObject.NULL)
+      put("className", className ?: JSONObject.NULL)
+      put("left", 0)
+      put("top", 0)
+      put("right", 0)
+      put("bottom", 0)
+      put("clickable", false)
+      put("origin", origin)
+      put("windowId", windowId)
+    })
+  }
+
+  private fun belongsToPackage(node: AccessibilityNodeInfo, expectedPackage: String): Boolean {
+    return try {
+      val actual = node.packageName?.toString()?.lowercase()
+      actual == null || actual == expectedPackage.lowercase()
+    } catch (_: Exception) {
+      true
+    }
+  }
+
+  private fun safeWindowId(node: AccessibilityNodeInfo): Int {
+    return try {
+      node.windowId
+    } catch (_: Exception) {
+      -1
     }
   }
 
@@ -188,16 +360,19 @@ class RideAccessibilityService : AccessibilityService() {
     depth: Int,
     out: JSONArray,
     seenTexts: MutableSet<String>,
-    counter: IntArray
+    seenNodes: MutableSet<String>,
+    counter: IntArray,
+    origin: String,
+    windowId: Int
   ) {
     if (depth > MAX_DEPTH || counter[0] >= MAX_NODES) return
-    counter[0]++
 
     try {
       val text = node.text?.toString()?.trim()?.take(MAX_CHARS_PER_TEXT)
       val desc = node.contentDescription?.toString()?.trim()?.take(MAX_CHARS_PER_TEXT)
       val viewId = node.viewIdResourceName?.substringAfterLast("/")?.take(48)
       val className = node.className?.toString()?.substringAfterLast('.')?.take(40)
+      val clickable = try { node.isClickable } catch (_: Exception) { false }
 
       val bounds = Rect()
       try {
@@ -205,26 +380,33 @@ class RideAccessibilityService : AccessibilityService() {
       } catch (_: Exception) {
         bounds.set(0, 0, 0, 0)
       }
-      val relevantText = selectRelevantText(text, desc, bounds, seenTexts)
 
+      val relevantText = selectRelevantText(text, desc, bounds, seenTexts, origin, windowId)
       val hasGeometry = bounds.width() > 0 || bounds.height() > 0
       val hasUseful =
         !relevantText.isNullOrBlank() ||
           !viewId.isNullOrBlank() ||
-          hasGeometry
+          hasGeometry ||
+          clickable
 
-      if (hasUseful && shouldKeepNode(relevantText, viewId, className)) {
-        val obj = JSONObject().apply {
-          put("text", relevantText ?: JSONObject.NULL)
-          put("viewId", viewId ?: JSONObject.NULL)
-          put("className", className ?: JSONObject.NULL)
-          put("left", bounds.left)
-          put("top", bounds.top)
-          put("right", bounds.right)
-          put("bottom", bounds.bottom)
-          put("clickable", node.isClickable)
+      if (hasUseful && shouldKeepNode(relevantText, viewId, className, clickable)) {
+        val nodeKey = buildNodeKey(relevantText, viewId, className, bounds, clickable, origin, windowId)
+        if (seenNodes.add(nodeKey)) {
+          counter[0]++
+          val obj = JSONObject().apply {
+            put("text", relevantText ?: JSONObject.NULL)
+            put("viewId", viewId ?: JSONObject.NULL)
+            put("className", className ?: JSONObject.NULL)
+            put("left", bounds.left)
+            put("top", bounds.top)
+            put("right", bounds.right)
+            put("bottom", bounds.bottom)
+            put("clickable", clickable)
+            put("origin", origin)
+            put("windowId", windowId)
+          }
+          out.put(obj)
         }
-        out.put(obj)
       }
 
       val childCount = try {
@@ -238,7 +420,7 @@ class RideAccessibilityService : AccessibilityService() {
         try {
           child = node.getChild(i)
           if (child != null) {
-            traverse(child, depth + 1, out, seenTexts, counter)
+            traverse(child, depth + 1, out, seenTexts, seenNodes, counter, origin, windowId)
           }
         } catch (_: Exception) {
         } finally {
@@ -256,7 +438,9 @@ class RideAccessibilityService : AccessibilityService() {
     text: String?,
     desc: String?,
     bounds: Rect,
-    seen: MutableSet<String>
+    seen: MutableSet<String>,
+    origin: String,
+    windowId: Int
   ): String? {
     val candidates = listOfNotNull(text, desc)
       .map { it.trim() }
@@ -266,6 +450,7 @@ class RideAccessibilityService : AccessibilityService() {
     for (candidate in candidates) {
       val sanitized = sanitizeOperationalText(candidate) ?: continue
       val key = buildString {
+        append(origin).append('|').append(windowId).append('|')
         append(normalizeForDedupe(sanitized))
         append('@').append(bounds.left).append(',').append(bounds.top)
         append(',').append(bounds.right).append(',').append(bounds.bottom)
@@ -277,13 +462,37 @@ class RideAccessibilityService : AccessibilityService() {
     return null
   }
 
-  private fun shouldKeepNode(text: String?, viewId: String?, className: String?): Boolean {
+  private fun shouldKeepNode(text: String?, viewId: String?, className: String?, clickable: Boolean): Boolean {
     if (!text.isNullOrBlank()) return true
     if (!viewId.isNullOrBlank()) return true
+    if (clickable) return true
     if (className != null && (className.contains("Button", true) || className.contains("TextView", true))) {
       return true
     }
     return false
+  }
+
+  private fun buildNodeKey(
+    text: String?,
+    viewId: String?,
+    className: String?,
+    bounds: Rect,
+    clickable: Boolean,
+    origin: String,
+    windowId: Int
+  ): String {
+    return listOf(
+      origin,
+      windowId.toString(),
+      text?.let { normalizeForDedupe(it) }.orEmpty(),
+      viewId.orEmpty(),
+      className.orEmpty(),
+      bounds.left.toString(),
+      bounds.top.toString(),
+      bounds.right.toString(),
+      bounds.bottom.toString(),
+      clickable.toString()
+    ).joinToString("|")
   }
 
   /**
@@ -321,16 +530,39 @@ class RideAccessibilityService : AccessibilityService() {
   }
 
   private fun buildFingerprint(packageName: String, nodes: JSONArray): String {
-    val parts = mutableListOf<String>()
-    parts.add(packageName.lowercase())
+    val operational = mutableListOf<String>()
+    val structural = mutableListOf<String>()
+
     for (i in 0 until nodes.length()) {
       val n = nodes.optJSONObject(i) ?: continue
       val t = n.optString("text", "").trim()
-      if (t.isEmpty()) continue
-      if (looksOperational(t)) {
-        parts.add(normalizeForDedupe(t))
+      if (t.isNotEmpty() && looksOperational(t)) {
+        operational.add(normalizeForDedupe(t))
+      }
+
+      if (structural.size < 48) {
+        structural.add(
+          listOf(
+            n.optString("origin", ""),
+            n.optInt("windowId", -1).toString(),
+            n.optString("viewId", ""),
+            n.optString("className", ""),
+            n.optInt("left", 0).toString(),
+            n.optInt("top", 0).toString(),
+            n.optInt("right", 0).toString(),
+            n.optInt("bottom", 0).toString(),
+            n.optBoolean("clickable", false).toString()
+          ).joinToString(":")
+        )
       }
     }
-    return parts.sorted().joinToString("|").hashCode().toString()
+
+    val parts = mutableListOf(packageName.lowercase())
+    if (operational.isNotEmpty()) {
+      parts.addAll(operational.sorted())
+    } else {
+      parts.addAll(structural.sorted())
+    }
+    return parts.joinToString("|").hashCode().toString()
   }
 }
