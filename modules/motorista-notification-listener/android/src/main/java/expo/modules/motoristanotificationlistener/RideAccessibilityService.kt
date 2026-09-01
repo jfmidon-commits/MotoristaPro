@@ -19,8 +19,8 @@ import java.util.concurrent.atomic.AtomicReference
  * Coexists with RideNotificationListenerService.
  *
  * Privacy: does not persist raw PII (names, full addresses, free-form notes).
- * Performance: package/event allowlist, leading+trailing capture, depth/node/char caps,
- * background persistence and fingerprint dedupe.
+ * Performance: package/event allowlist, bounded leading+early+trailing sampling,
+ * depth/node/char caps, background persistence and fingerprint dedupe.
  */
 class RideAccessibilityService : AccessibilityService() {
 
@@ -41,8 +41,8 @@ class RideAccessibilityService : AccessibilityService() {
     private const val MAX_NODES = 160
     private const val MAX_CHARS_PER_TEXT = 80
     private const val MAX_SNAPSHOT_BYTES = 14_000
-    private const val LEADING_CAPTURE_INTERVAL_MS = 300L
-    private const val TRAILING_CAPTURE_MS = 420L
+    private const val EARLY_FOLLOW_UP_MS = 120L
+    private const val TRAILING_CAPTURE_MS = 280L
     private const val FINGERPRINT_TTL_MS = 4_000L
 
     private val OPERATIONAL_FRAGMENT_PATTERNS = listOf(
@@ -62,8 +62,12 @@ class RideAccessibilityService : AccessibilityService() {
   private val persistExecutor: ExecutorService = Executors.newSingleThreadExecutor()
   private val lastFingerprint = AtomicReference<String?>(null)
   private val lastFingerprintAt = AtomicLong(0L)
-  private val lastCaptureAt = AtomicLong(0L)
+  private var earlyRunnable: Runnable? = null
   private var trailingRunnable: Runnable? = null
+  private var burstPackageName: String? = null
+  private var burstEventType: Int = 0
+  private var burstEventSignal: JSONObject? = null
+  private var earlyScheduledForBurst = false
 
   override fun onServiceConnected() {
     super.onServiceConnected()
@@ -101,31 +105,86 @@ class RideAccessibilityService : AccessibilityService() {
 
     val eventSignal = buildEventSignal(event)
     val eventType = event.eventType
-    val now = System.currentTimeMillis()
 
-    // Leading capture: never wait for the event storm to stop before taking the first sample.
-    val previousCapture = lastCaptureAt.get()
-    if (now - previousCapture >= LEADING_CAPTURE_INTERVAL_MS && lastCaptureAt.compareAndSet(previousCapture, now)) {
+    // A new window state is treated as a new burst so its first frame is never
+    // hidden behind callbacks from the previous screen/card.
+    if (eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED && burstPackageName != null) {
+      cancelBurstCallbacks()
+      clearBurstState()
+    }
+
+    val isNewBurst = burstPackageName == null
+    burstPackageName = packageName
+    burstEventType = eventType
+    burstEventSignal = eventSignal
+
+    // Leading: exactly once per burst, immediately consuming event.source.
+    // AccessibilityNodeInfo is never retained for delayed work.
+    if (isNewBurst) {
       val source = try { event.source } catch (_: Exception) { null }
       captureSnapshot(packageName, eventType, eventSignal, source)
     }
 
-    // Trailing capture: also sample the settled state after the UI animation/event storm.
-    trailingRunnable?.let { mainHandler.removeCallbacks(it) }
-    val runnable = Runnable {
-      lastCaptureAt.set(System.currentTimeMillis())
-      captureSnapshot(packageName, eventType, eventSignal, null)
+    // Early follow-up: exactly once per burst for state/content changes. It re-reads
+    // active roots/windows at execution time and does not retain event.source.
+    if (
+      eventType != AccessibilityEvent.TYPE_VIEW_SCROLLED &&
+      !earlyScheduledForBurst
+    ) {
+      earlyScheduledForBurst = true
+      val early = Runnable {
+        earlyRunnable = null
+        captureCurrentBurst()
+      }
+      earlyRunnable = early
+      mainHandler.postDelayed(early, EARLY_FOLLOW_UP_MS)
     }
-    trailingRunnable = runnable
-    mainHandler.postDelayed(runnable, TRAILING_CAPTURE_MS)
+
+    // Trailing: every event restarts the settled-state sample. A continuous storm
+    // therefore remains bounded to leading + one early + one final capture.
+    trailingRunnable?.let { mainHandler.removeCallbacks(it) }
+    val trailing = Runnable {
+      trailingRunnable = null
+      captureCurrentBurst()
+      clearBurstIfIdle()
+    }
+    trailingRunnable = trailing
+    mainHandler.postDelayed(trailing, TRAILING_CAPTURE_MS)
   }
 
   override fun onInterrupt() {}
 
   override fun onDestroy() {
-    trailingRunnable?.let { mainHandler.removeCallbacks(it) }
+    cancelBurstCallbacks()
+    clearBurstState()
     persistExecutor.shutdownNow()
     super.onDestroy()
+  }
+
+  private fun captureCurrentBurst() {
+    val packageName = burstPackageName ?: return
+    val eventSignal = burstEventSignal ?: return
+    captureSnapshot(packageName, burstEventType, eventSignal, null)
+  }
+
+  private fun cancelBurstCallbacks() {
+    earlyRunnable?.let { mainHandler.removeCallbacks(it) }
+    trailingRunnable?.let { mainHandler.removeCallbacks(it) }
+    earlyRunnable = null
+    trailingRunnable = null
+  }
+
+  private fun clearBurstState() {
+    burstPackageName = null
+    burstEventSignal = null
+    burstEventType = 0
+    earlyScheduledForBurst = false
+  }
+
+  private fun clearBurstIfIdle() {
+    if (earlyRunnable == null && trailingRunnable == null) {
+      clearBurstState()
+    }
   }
 
   private fun isAllowedPackage(packageName: String): Boolean {
@@ -219,7 +278,6 @@ class RideAccessibilityService : AccessibilityService() {
       }
     }
 
-    // Ride offer cards can live in another interactive window/overlay.
     try {
       for (window in windows.orEmpty()) {
         if (counter[0] >= MAX_NODES) break
@@ -509,11 +567,6 @@ class RideAccessibilityService : AccessibilityService() {
     ).joinToString("|")
   }
 
-  /**
-   * Extracts only operational fragments needed for offer parsing. The original node text
-   * is never persisted, so a node that also contains an address/name keeps only tokens
-   * such as price, distance, time, category and known fare labels.
-   */
   private fun sanitizeOperationalText(value: String): String? {
     val fragments = mutableListOf<Pair<Int, String>>()
     for (pattern in OPERATIONAL_FRAGMENT_PATTERNS) {
