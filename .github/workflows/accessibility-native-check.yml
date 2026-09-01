@@ -1,35 +1,21 @@
-name: Android APK
+name: Accessibility Native Check
 
 on:
-  workflow_dispatch:
-  push:
-    branches:
-      - stabilize/offline-sync
-    paths:
-      - "src/**"
-      - "modules/**"
-      - "App.tsx"
-      - "app.json"
-      - "package.json"
-      - ".env.example"
-      - ".github/workflows/android-apk.yml"
   pull_request:
     branches:
       - main
     paths:
-      - "src/**"
-      - "modules/**"
-      - "App.tsx"
-      - "app.json"
-      - "package.json"
-      - ".env.example"
-      - ".github/workflows/android-apk.yml"
+      - "modules/motorista-notification-listener/**"
+      - "src/services/AccessibilityOfferParser.ts"
+      - "src/__tests__/AccessibilityOfferParser.test.ts"
+      - "src/screens/NotificationCaptureScreen.tsx"
+      - ".github/workflows/accessibility-native-check.yml"
 
 jobs:
-  build-apk:
-    if: github.event_name != 'pull_request' || github.head_ref != 'feature/ride-accessibility-capture'
+  native-compile:
+    if: github.head_ref == 'feature/ride-accessibility-capture'
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 25
 
     steps:
       - name: Checkout
@@ -49,7 +35,7 @@ jobs:
       - name: Install dependencies
         run: npm install
 
-      - name: Configure MotoristaPro Supabase
+      - name: Configure environment
         run: cp .env.example .env.local
 
       - name: Generate Android project
@@ -65,19 +51,8 @@ jobs:
           </resources>
           EOF
 
-      - name: Build standalone APK
+      - name: Compile Kotlin only
         working-directory: android
         env:
           NODE_ENV: production
-        run: ./gradlew assembleRelease --no-daemon
-
-      - name: Rename APK
-        run: cp android/app/build/outputs/apk/release/app-release.apk MotoristaPro-test.apk
-
-      - name: Upload APK
-        uses: actions/upload-artifact@v4
-        with:
-          name: MotoristaPro-Android-test
-          path: MotoristaPro-test.apk
-          if-no-files-found: error
-          retention-days: 14
+        run: ./gradlew :app:compileReleaseKotlin --no-daemon

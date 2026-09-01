@@ -190,6 +190,12 @@ export async function processPendingDeletes(
         case "preventive_maintenance_plans":
           result = await supabase.from("preventive_maintenance_plans").delete().eq("id", item.record_id);
           break;
+        case "ride_results":
+          result = await supabase.from("ride_results").delete().eq("id", item.record_id);
+          break;
+        case "ride_offers":
+          result = await supabase.from("ride_offers").delete().eq("id", item.record_id);
+          break;
         default:
           remoteError = "table_name desconhecido";
       }
@@ -226,6 +232,12 @@ export async function processPendingDeletes(
         break;
       case "preventive_maintenance_plans":
         await db.runAsync(`DELETE FROM preventive_maintenance_plans WHERE id = ?`, [item.record_id]);
+        break;
+      case "ride_results":
+        await db.runAsync(`DELETE FROM ride_results WHERE id = ?`, [item.record_id]);
+        break;
+      case "ride_offers":
+        await db.runAsync(`DELETE FROM ride_offers WHERE id = ?`, [item.record_id]);
         break;
     }
 

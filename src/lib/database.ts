@@ -2,7 +2,7 @@ import * as SQLite from "expo-sqlite";
 
 let dbInstance: SQLite.SQLiteDatabase | null = null;
 
-const LATEST_DB_VERSION = 4;
+const LATEST_DB_VERSION = 5;
 
 export async function getDb(): Promise<SQLite.SQLiteDatabase> {
   if (dbInstance) return dbInstance;
@@ -105,6 +105,63 @@ async function migrate(db: SQLite.SQLiteDatabase) {
       FOREIGN KEY (vehicle_id) REFERENCES vehicles(id)
     );
 
+    CREATE TABLE IF NOT EXISTS ride_offers (
+      id TEXT PRIMARY KEY NOT NULL,
+      user_id TEXT NOT NULL,
+      vehicle_id TEXT,
+      work_session_id TEXT,
+      platform TEXT NOT NULL CHECK (platform IN ('uber','99','indrive','other')),
+      category TEXT,
+      captured_at TEXT NOT NULL,
+      offered_amount INTEGER NOT NULL CHECK (offered_amount >= 0),
+      pickup_distance_km REAL CHECK (pickup_distance_km IS NULL OR pickup_distance_km >= 0),
+      pickup_duration_minutes REAL CHECK (pickup_duration_minutes IS NULL OR pickup_duration_minutes >= 0),
+      trip_distance_km REAL CHECK (trip_distance_km IS NULL OR trip_distance_km >= 0),
+      trip_duration_minutes REAL CHECK (trip_duration_minutes IS NULL OR trip_duration_minutes >= 0),
+      total_expected_distance_km REAL CHECK (total_expected_distance_km IS NULL OR total_expected_distance_km >= 0),
+      total_expected_duration_minutes REAL CHECK (total_expected_duration_minutes IS NULL OR total_expected_duration_minutes >= 0),
+      approximate_origin_zone TEXT,
+      approximate_destination_zone TEXT,
+      additional_pay INTEGER NOT NULL DEFAULT 0 CHECK (additional_pay >= 0),
+      capture_source TEXT NOT NULL,
+      extraction_confidence REAL CHECK (extraction_confidence IS NULL OR (extraction_confidence >= 0 AND extraction_confidence <= 1)),
+      estimated_cost INTEGER,
+      expected_net_profit INTEGER,
+      expected_net_per_km INTEGER,
+      expected_net_per_hour INTEGER,
+      decision_label TEXT CHECK (decision_label IS NULL OR decision_label IN ('good','borderline','bad')),
+      decision_score INTEGER CHECK (decision_score IS NULL OR (decision_score >= 0 AND decision_score <= 100)),
+      decision_reasons_positive_json TEXT,
+      decision_reasons_negative_json TEXT,
+      decision_confidence REAL CHECK (decision_confidence IS NULL OR (decision_confidence >= 0 AND decision_confidence <= 1)),
+      created_at TEXT NOT NULL,
+      sync_state TEXT NOT NULL DEFAULT 'pending',
+      sync_error TEXT,
+      FOREIGN KEY (vehicle_id) REFERENCES vehicles(id),
+      FOREIGN KEY (work_session_id) REFERENCES work_sessions(id)
+    );
+
+    CREATE TABLE IF NOT EXISTS ride_results (
+      id TEXT PRIMARY KEY NOT NULL,
+      ride_offer_id TEXT NOT NULL,
+      user_id TEXT NOT NULL,
+      vehicle_id TEXT,
+      final_amount INTEGER NOT NULL CHECK (final_amount >= 0),
+      actual_distance_km REAL CHECK (actual_distance_km IS NULL OR actual_distance_km >= 0),
+      actual_duration_minutes REAL CHECK (actual_duration_minutes IS NULL OR actual_duration_minutes >= 0),
+      started_at TEXT,
+      ended_at TEXT,
+      estimated_cost INTEGER,
+      net_profit INTEGER,
+      net_per_km INTEGER,
+      net_per_hour INTEGER,
+      created_at TEXT NOT NULL,
+      sync_state TEXT NOT NULL DEFAULT 'pending',
+      sync_error TEXT,
+      FOREIGN KEY (ride_offer_id) REFERENCES ride_offers(id),
+      FOREIGN KEY (vehicle_id) REFERENCES vehicles(id)
+    );
+
     CREATE TABLE IF NOT EXISTS pending_deletes (
       id TEXT PRIMARY KEY NOT NULL,
       user_id TEXT NOT NULL,
@@ -148,6 +205,12 @@ async function migrate(db: SQLite.SQLiteDatabase) {
     CREATE INDEX IF NOT EXISTS idx_preventive_plans_vehicle ON preventive_maintenance_plans(vehicle_id);
     CREATE INDEX IF NOT EXISTS idx_preventive_plans_user_vehicle ON preventive_maintenance_plans(user_id, vehicle_id);
     CREATE INDEX IF NOT EXISTS idx_preventive_plans_sync ON preventive_maintenance_plans(sync_state);
+    CREATE INDEX IF NOT EXISTS idx_ride_offers_user_captured ON ride_offers(user_id, captured_at);
+    CREATE INDEX IF NOT EXISTS idx_ride_offers_work_session ON ride_offers(work_session_id);
+    CREATE INDEX IF NOT EXISTS idx_ride_offers_sync ON ride_offers(sync_state);
+    CREATE INDEX IF NOT EXISTS idx_ride_results_user ON ride_results(user_id);
+    CREATE INDEX IF NOT EXISTS idx_ride_results_offer ON ride_results(ride_offer_id);
+    CREATE INDEX IF NOT EXISTS idx_ride_results_sync ON ride_results(sync_state);
     CREATE INDEX IF NOT EXISTS idx_pending_deletes_user ON pending_deletes(user_id);
     CREATE INDEX IF NOT EXISTS idx_pending_deletes_sync ON pending_deletes(sync_state);
     CREATE UNIQUE INDEX IF NOT EXISTS idx_pending_deletes_record
@@ -166,6 +229,8 @@ async function migrate(db: SQLite.SQLiteDatabase) {
 export async function DEBUG_wipeLocalDb() {
   const db = await getDb();
   await db.execAsync(`
+    DELETE FROM ride_results;
+    DELETE FROM ride_offers;
     DELETE FROM preventive_maintenance_plans;
     DELETE FROM work_sessions;
     DELETE FROM maintenance_events;

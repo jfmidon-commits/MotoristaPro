@@ -5,7 +5,7 @@ import { useTransactionSync } from "@/hooks/useTransactionSync";
 import { useAuth } from "@/context/AuthContext";
 import { runSyncDiagnostics, type SyncDiagnosticsResult } from "@/services/SyncDiagnosticsService";
 
-export default function SyncStatusScreen() {
+export default function SyncStatusScreen({ navigation }: any) {
   const { status, syncNow } = useTransactionSync();
   const { user } = useAuth();
   const [syncing, setSyncing] = React.useState(false);
@@ -41,6 +41,8 @@ export default function SyncStatusScreen() {
           <Row label="Manutenções pendentes" value={String(status.pendingMaintenance)} />
           <Row label="Planos preventivos pendentes" value={String(status.pendingPreventiveMaintenance)} />
           <Row label="Turnos pendentes" value={String(status.pendingWorkSessions)} />
+          <Row label="Ofertas de corrida pendentes" value={String(status.pendingRideOffers)} />
+          <Row label="Resultados de corrida pendentes" value={String(status.pendingRideResults)} />
           <Row label="Deleções pendentes" value={String(status.pendingDeletes)} />
           <Row
             label="Última tentativa"
@@ -81,6 +83,10 @@ export default function SyncStatusScreen() {
           ) : (
             <Text style={styles.secondaryButtonText}>Verificar se está pronto</Text>
           )}
+        </Pressable>
+
+        <Pressable style={styles.secondaryButton} onPress={() => navigation.navigate("NotificationCapture")}>
+          <Text style={styles.secondaryButtonText}>Captura automática de ofertas</Text>
         </Pressable>
 
         <Pressable style={styles.button} onPress={handleSync} disabled={syncing}>
