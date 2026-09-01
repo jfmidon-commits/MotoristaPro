@@ -74,10 +74,43 @@ describe("AccessibilityOfferParser", () => {
     const result = __test.pickOfferAmount([
       { value: 20, raw: "R$ 20,00", isRatePerKm: false, isTariffLike: false, isBonusLike: false, isBalanceLike: false, top: 10, left: 10 },
       { value: 20, raw: "R$ 20,00", isRatePerKm: false, isTariffLike: false, isBonusLike: false, isBalanceLike: false, top: 20, left: 10 },
-      { value: 30, raw: "R$ 30,00", isRatePerKm: false, isTariffLike: false, isBonusLike: false, isBalanceLike: false, top: 30, left: 10 },
-      { value: 30, raw: "R$ 30,00", isRatePerKm: false, isTariffLike: false, isBonusLike: false, isBalanceLike: false, top: 40, left: 10 }
-    ]);
+      { value: 20, raw: "R$ 20,00", isRatePerKm: false, isTariffLike: false, isBonusLike: false, isBalanceLike: false, top: 30, left: 10 },
+      { value: 30, raw: "R$ 30,00", isRatePerKm: false, isTariffLike: false, isBonusLike: false, isBalanceLike: false, top: 40, left: 10 },
+      { value: 30, raw: "R$ 30,00", isRatePerKm: false, isTariffLike: false, isBonusLike: false, isBalanceLike: false, top: 50, left: 10 },
+      { value: 30, raw: "R$ 30,00", isRatePerKm: false, isTariffLike: false, isBonusLike: false, isBalanceLike: false, top: 60, left: 10 }
+    ], true, 3);
     expect(result).toBeNull();
+  });
+
+  it("não deixa R$/km fragmentado repetido vencer um total maior", () => {
+    const result = __test.pickOfferAmount([
+      { value: 3.73, raw: "R$ 3,73", isRatePerKm: false, isTariffLike: false, isBonusLike: false, isBalanceLike: false, top: 10, left: 10 },
+      { value: 3.73, raw: "R$ 3,73", isRatePerKm: false, isTariffLike: false, isBonusLike: false, isBalanceLike: false, top: 20, left: 10 },
+      { value: 3.73, raw: "R$ 3,73", isRatePerKm: false, isTariffLike: false, isBonusLike: false, isBalanceLike: false, top: 30, left: 10 },
+      { value: 51.61, raw: "R$ 51,61", isRatePerKm: false, isTariffLike: false, isBonusLike: false, isBalanceLike: false, top: 40, left: 10 }
+    ], true, 3);
+    expect(result).toBeNull();
+  });
+
+  it("fallback estrutural Uber exige pelo menos três repetições e nó interativo", () => {
+    const onlyTwo = snap("com.ubercab.driver", [
+      node("R$ 51,61", 10, 10),
+      node("R$ 51,61", 20, 10),
+      node("50min", 30, 10, { clickable: true }),
+      node("/ km", 40, 10)
+    ]);
+    expect(__test.hasUberStructuralSignature(onlyTwo)).toBe(false);
+    expect(isOfferSnapshot(onlyTwo)).toBe(false);
+
+    const noClickable = snap("com.ubercab.driver", [
+      node("R$ 51,61", 10, 10),
+      node("R$ 51,61", 20, 10),
+      node("R$ 51,61", 30, 10),
+      node("50min", 40, 10),
+      node("/ km", 50, 10)
+    ]);
+    expect(__test.hasUberStructuralSignature(noClickable)).toBe(false);
+    expect(isOfferSnapshot(noClickable)).toBe(false);
   });
 
   it("extrai 99 canônica sem somar tarifas", () => {
@@ -93,6 +126,20 @@ describe("AccessibilityOfferParser", () => {
     expect(raw!.pickupDistanceKm).toBeCloseTo(0.176, 3);
     expect(raw!.tripDurationMinutes).toBe(17);
     expect(raw!.tripDistanceKm).toBe(10.2);
+  });
+
+  it("99 não herda o fallback de frequência específico da Uber", () => {
+    const s = snap("com.app99.driver", [
+      node("R$ 20,03", 10, 20),
+      node("R$ 20,03", 20, 20),
+      node("R$ 20,03", 30, 20),
+      node("R$ 18,00", 40, 20),
+      node("2 min", 90, 10),
+      node("176 m", 90, 80),
+      node("Pop", 5, 5),
+      node("Aceitar", 150, 40, { clickable: true })
+    ]);
+    expect(parseAccessibilitySnapshot(s)).toBeNull();
   });
 
   it("99 fora de ordem continua pareando via bounds", () => {
