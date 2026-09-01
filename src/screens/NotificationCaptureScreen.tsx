@@ -88,6 +88,24 @@ function snapshotPreview(snapshot: AccessibilitySnapshot): string[] {
   return lines;
 }
 
+function notificationPreview(notification: CapturedRideNotification): string[] {
+  const values = [
+    ...(notification.textLines ?? []),
+    notification.text,
+    notification.bigText,
+    notification.summaryText,
+    notification.infoText,
+    notification.bigContentTitle,
+    notification.tickerText,
+    notification.title,
+    notification.subText
+  ]
+    .map((value) => value?.trim())
+    .filter((value): value is string => Boolean(value));
+
+  return Array.from(new Set(values)).slice(0, 12);
+}
+
 export default function NotificationCaptureScreen() {
   const [status, setStatus] = useState<NativeNotificationPermissionStatus>("unavailable");
   const [a11yStatus, setA11yStatus] = useState<NativeNotificationPermissionStatus>("unavailable");
@@ -137,6 +155,7 @@ export default function NotificationCaptureScreen() {
     .reverse();
 
   const parsed = [...parsedA11y, ...parsedNotifications];
+  const latestNotifications = notifications.slice().reverse().slice(0, 5);
   const latestSnapshots = snapshots.slice().reverse().slice(0, 5);
 
   return (
@@ -200,6 +219,38 @@ export default function NotificationCaptureScreen() {
               </Text>
             </View>
           ))
+        )}
+
+        <Text style={styles.sectionTitle}>Diagnóstico das notificações</Text>
+        <Text style={styles.diagnosticHint}>
+          Mostra apenas fragmentos operacionais sanitizados e sinais de quais extras Android existiam. Não exibe mensagens, nomes ou endereços brutos.
+        </Text>
+        {latestNotifications.length === 0 ? (
+          <Text style={styles.empty}>Nenhuma notificação de app de corrida capturada ainda.</Text>
+        ) : (
+          latestNotifications.map((notification, index) => {
+            const raw = parseRideNotification(notification);
+            const preview = notificationPreview(notification);
+            return (
+              <View key={`${notification.notificationKey ?? notification.postedAt ?? index}-${index}`} style={styles.snapshotCard}>
+                <Text style={styles.snapshotTitle}>#{notifications.length - index} • {notification.packageName}</Text>
+                <Text style={styles.snapshotMeta}>{formatCapturedAt(notification.postedAt)}</Text>
+                <Text style={styles.snapshotMeta}>
+                  extras: básico {notification.hasBasicContent ? "sim" : "não"} • estendido {notification.hasExtendedContent ? "sim" : "não"} • textLines {notification.hasTextLines ? "sim" : "não"} • messages {notification.hasMessages ? "sim" : "não"}
+                </Text>
+                <Text style={[styles.parserBadge, raw ? styles.parserOk : styles.parserMiss]}>
+                  {raw ? "NOTIFICAÇÃO: OFERTA RECONHECIDA" : "NOTIFICAÇÃO: NÃO RECONHECEU"}
+                </Text>
+                {preview.length === 0 ? (
+                  <Text style={styles.empty}>Nenhum fragmento operacional sanitizado encontrado nos extras.</Text>
+                ) : (
+                  preview.map((line, lineIndex) => (
+                    <Text key={`${index}-notification-${lineIndex}`} style={styles.snapshotLine}>{line}</Text>
+                  ))
+                )}
+              </View>
+            );
+          })
         )}
 
         <Text style={styles.sectionTitle}>Diagnóstico dos snapshots</Text>
