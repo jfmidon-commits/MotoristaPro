@@ -13,7 +13,7 @@ on:
 
 jobs:
   native-compile:
-    if: github.head_ref == 'feature/ride-accessibility-capture'
+    if: github.head_ref == 'feature/ride-accessibility-capture' || github.head_ref == 'experiment/ride-accessibility-screenshot-ocr'
     runs-on: ubuntu-latest
     timeout-minutes: 25
 
