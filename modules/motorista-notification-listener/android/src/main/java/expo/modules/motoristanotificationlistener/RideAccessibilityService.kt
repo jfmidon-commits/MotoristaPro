@@ -174,7 +174,7 @@ class RideAccessibilityService : AccessibilityService() {
           put("top", bounds?.top ?: 0)
           put("right", bounds?.right ?: 0)
           put("bottom", bounds?.bottom ?: 0)
-          put("clickable", /acceptMarker(raw))
+          put("clickable", acceptMarker(raw))
           put("origin", "screenshotOcr")
           put("windowId", event.windowId)
         })
