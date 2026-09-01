@@ -138,6 +138,26 @@ function detectPlatform(packageName: string): RidePlatform | null {
   return null;
 }
 
+function countPositiveMoneyValues(nodes: AccessibilityNodeSnapshot[]): Map<number, number> {
+  const counts = new Map<number, number>();
+  for (const money of extractMoney(nodes)) {
+    if (money.value <= 0 || money.isTariffLike || money.isBonusLike || money.isBalanceLike) continue;
+    counts.set(money.value, (counts.get(money.value) ?? 0) + 1);
+  }
+  return counts;
+}
+
+function hasUberStructuralSignature(snapshot: AccessibilitySnapshot): boolean {
+  if ((snapshot.packageName ?? "").toLowerCase() !== "com.ubercab.driver") return false;
+  const nodes = dedupeTexts(snapshot.nodes ?? []);
+  const texts = nodes.map((n) => n.text ?? "").join(" ");
+  const moneyCounts = countPositiveMoneyValues(nodes);
+  const hasRepeatedMoney = [...moneyCounts.values()].some((count) => count >= 2);
+  const hasDuration = /\b[0-9]+(?:[.,][0-9]+)?\s*(?:min|minuto|minutos)\b/i.test(texts);
+  const hasRateFragment = /\/\s*km\b/i.test(texts);
+  return hasRepeatedMoney && hasDuration && hasRateFragment;
+}
+
 export function isOfferSnapshot(snapshot: AccessibilitySnapshot): boolean {
   const nodes = snapshot.nodes ?? [];
   const texts = nodes.map((n) => n.text ?? "").join(" ");
@@ -148,7 +168,7 @@ export function isOfferSnapshot(snapshot: AccessibilitySnapshot): boolean {
   );
 
   if (!hasMoney) return false;
-  return hasMarker || hasClickableAccept;
+  return hasMarker || hasClickableAccept || hasUberStructuralSignature(snapshot);
 }
 
 function pickOfferAmount(moneys: ParsedMoney[]): { amount: number; confidencePenalty: number } | null {
@@ -161,17 +181,31 @@ function pickOfferAmount(moneys: ParsedMoney[]): { amount: number; confidencePen
       !m.isBalanceLike
   );
   if (candidates.length === 0) return null;
-  const distinct = candidates.filter(
-    (candidate, index, all) =>
-      all.findIndex(
-        (other) =>
-          other.value === candidate.value &&
-          other.top === candidate.top &&
-          other.left === candidate.left
-      ) === index
-  );
-  if (distinct.length !== 1) return null;
-  return { amount: distinct[0].value, confidencePenalty: 0 };
+
+  const groups = new Map<number, ParsedMoney[]>();
+  for (const candidate of candidates) {
+    const group = groups.get(candidate.value) ?? [];
+    group.push(candidate);
+    groups.set(candidate.value, group);
+  }
+
+  if (groups.size === 1) {
+    const [amount, group] = [...groups.entries()][0];
+    return { amount, confidencePenalty: group.length > 1 ? 0.02 : 0 };
+  }
+
+  const ranked = [...groups.entries()].sort((a, b) => b[1].length - a[1].length || b[0] - a[0]);
+  const [winnerAmount, winnerGroup] = ranked[0];
+  const runnerUpCount = ranked[1]?.[1].length ?? 0;
+
+  // Árvores reais do Uber podem repetir o valor total em vários nós/bounds,
+  // enquanto um valor secundário (ex.: R$/km separado do sufixo "/ km") aparece uma vez.
+  // Só aceitamos a frequência como desempate quando há vencedor inequívoco e repetido.
+  if (winnerGroup.length >= 2 && winnerGroup.length > runnerUpCount) {
+    return { amount: winnerAmount, confidencePenalty: 0.08 };
+  }
+
+  return null;
 }
 
 function pairLegs(metrics: ParsedMetric[]): {
@@ -291,6 +325,7 @@ export function parseAccessibilitySnapshot(snapshot: AccessibilitySnapshot): Raw
   if (legs.pickupDistanceKm == null && legs.tripDistanceKm == null) confidence -= 0.15;
   if (legs.pickupDurationMinutes == null && legs.tripDurationMinutes == null) confidence -= 0.1;
   if (!OFFER_MARKERS.some((m) => m.test(allText))) confidence -= 0.08;
+  if (hasUberStructuralSignature(snapshot) && !OFFER_MARKERS.some((m) => m.test(allText))) confidence -= 0.04;
   confidence = Math.max(0.15, Math.min(0.95, confidence));
 
   const hasAnyLeg =
@@ -321,5 +356,7 @@ export const __test = {
   pairLegs,
   pickOfferAmount,
   isOfferSnapshot,
-  parseDecimal
+  parseDecimal,
+  hasUberStructuralSignature,
+  countPositiveMoneyValues
 };
