@@ -21,6 +21,8 @@ export interface AccessibilityNodeSnapshot {
   right?: number | null;
   bottom?: number | null;
   clickable?: boolean | null;
+  origin?: "eventText" | "eventDescription" | "eventSource" | "activeRoot" | "window" | string | null;
+  windowId?: number | null;
 }
 
 export interface AccessibilitySnapshot {
@@ -31,6 +33,7 @@ export interface AccessibilitySnapshot {
   nodes?: AccessibilityNodeSnapshot[];
   fingerprint?: string | null;
   truncated?: boolean | null;
+  origins?: string[];
 }
 
 type NativeModuleShape = {
