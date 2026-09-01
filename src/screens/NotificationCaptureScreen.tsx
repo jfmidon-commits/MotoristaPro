@@ -17,6 +17,7 @@ import {
 } from "../../modules/motorista-notification-listener";
 import { parseRideNotification } from "@/services/NotificationOfferParser";
 import { parseAccessibilitySnapshot } from "@/services/AccessibilityOfferParser";
+import { assessUberStructuralOffer } from "@/services/AccessibilityStructuralDiagnostics";
 import { normalizeRideOffer } from "@/services/RideOfferNormalizer";
 
 function permissionLabel(status: NativeNotificationPermissionStatus): string {
@@ -203,14 +204,26 @@ export default function NotificationCaptureScreen() {
 
         <Text style={styles.sectionTitle}>Diagnóstico dos snapshots</Text>
         <Text style={styles.diagnosticHint}>
-          Mostra somente conteúdo sanitizado e metadados estruturais locais (classe, viewId, bounds, janela, origem e clicável). Nenhum texto bruto adicional é persistido por esta tela.
+          Mostra somente conteúdo sanitizado e metadados estruturais locais (classe, viewId, bounds, janela, origem e clicável). Um card pode ser marcado como candidato estrutural mesmo quando a Uber não expõe o valor em texto; nesse caso o MotoristaPro não inventa o preço.
         </Text>
         {latestSnapshots.length === 0 ? (
           <Text style={styles.empty}>Nenhum snapshot capturado ainda.</Text>
         ) : (
           latestSnapshots.map((snapshot, index) => {
             const raw = parseAccessibilitySnapshot(snapshot);
+            const structural = assessUberStructuralOffer(snapshot);
             const preview = snapshotPreview(snapshot);
+            const parserLabel = raw
+              ? "PARSER: OFERTA RECONHECIDA"
+              : structural.candidate
+                ? `ESTRUTURA DE OFERTA CANDIDATA • ${structural.confidence.toUpperCase()} • VALOR INDISPONÍVEL`
+                : "PARSER: NÃO RECONHECEU";
+            const parserStyle = raw
+              ? styles.parserOk
+              : structural.candidate
+                ? styles.parserCandidate
+                : styles.parserMiss;
+
             return (
               <View key={`${snapshot.fingerprint ?? snapshot.capturedAt ?? index}-${index}`} style={styles.snapshotCard}>
                 <Text style={styles.snapshotTitle}>
@@ -223,9 +236,12 @@ export default function NotificationCaptureScreen() {
                 {snapshot.origins?.length ? (
                   <Text style={styles.snapshotMeta}>origens: {snapshot.origins.join(", ")}</Text>
                 ) : null}
-                <Text style={[styles.parserBadge, raw ? styles.parserOk : styles.parserMiss]}>
-                  {raw ? "PARSER: OFERTA RECONHECIDA" : "PARSER: NÃO RECONHECEU"}
-                </Text>
+                <Text style={[styles.parserBadge, parserStyle]}>{parserLabel}</Text>
+                {structural.candidate && !raw ? (
+                  <Text style={styles.snapshotMeta}>
+                    estrutura: janela {structural.windowId ?? "—"} • {structural.reasons.join(" • ")}
+                  </Text>
+                ) : null}
                 {raw ? (
                   <Text style={styles.snapshotMeta}>
                     bruto: R$ {formatRawAmount(raw.offeredAmount)} • pickup {raw.pickupDistanceKm ?? "—"} km / {raw.pickupDurationMinutes ?? "—"} min • viagem {raw.tripDistanceKm ?? "—"} km / {raw.tripDurationMinutes ?? "—"} min
@@ -272,6 +288,7 @@ const styles = StyleSheet.create({
   snapshotMeta: { color: "#94A3B8", fontSize: 12, lineHeight: 18, marginTop: 4 },
   parserBadge: { fontSize: 12, fontWeight: "900", marginTop: 8, marginBottom: 6 },
   parserOk: { color: "#4ADE80" },
+  parserCandidate: { color: "#FBBF24" },
   parserMiss: { color: "#F87171" },
   snapshotLine: { color: "#CBD5E1", fontSize: 12, lineHeight: 17, marginTop: 3 }
 });
