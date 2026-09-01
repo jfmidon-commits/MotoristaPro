@@ -9,6 +9,18 @@ export interface OfferDecisionThresholds {
   yellowPerHour: number;
 }
 
+/**
+ * Initial MotoristaPro decision targets copied from the driver's current
+ * calculation screen. They are defaults only and can later be edited in-app.
+ * Red: below yellow threshold; yellow: transition band; green: target reached.
+ */
+export const DEFAULT_OFFER_DECISION_THRESHOLDS: OfferDecisionThresholds = {
+  greenPerKm: 2.10,
+  yellowPerKm: 1.70,
+  greenPerHour: 46,
+  yellowPerHour: 35
+};
+
 export interface RideOfferEconomics {
   reaisPerKm: number | null;
   reaisPerHour: number | null;
@@ -27,7 +39,7 @@ export function calculateOfferEconomics(offer: NormalizedRideOffer): RideOfferEc
 
 export function classifyOffer(
   offer: NormalizedRideOffer,
-  thresholds?: OfferDecisionThresholds | null
+  thresholds: OfferDecisionThresholds | null = DEFAULT_OFFER_DECISION_THRESHOLDS
 ): OfferSemaphore {
   if (!thresholds) return "neutral";
 
