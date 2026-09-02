@@ -2,52 +2,83 @@ package expo.modules.motoristanotificationlistener
 
 import android.accessibilityservice.AccessibilityService
 import android.graphics.Bitmap
+import android.graphics.Color
+import android.graphics.PixelFormat
 import android.graphics.Rect
+import android.graphics.drawable.GradientDrawable
 import android.os.Build
+import android.os.Handler
+import android.os.Looper
 import android.view.Display
+import android.view.Gravity
+import android.view.View
+import android.view.WindowManager
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityWindowInfo
+import android.widget.LinearLayout
+import android.widget.TextView
 import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.text.Text
 import com.google.mlkit.vision.text.TextRecognition
 import com.google.mlkit.vision.text.latin.TextRecognizerOptions
 import org.json.JSONArray
 import org.json.JSONObject
+import java.util.Locale
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 
 /**
  * EXPERIMENTAL BRANCH ONLY.
  *
- * Pipeline under test:
+ * Pipeline:
  * Uber overlay/window signal -> AccessibilityService.takeScreenshot() ->
  * on-device ML Kit OCR -> persist only operational OCR lines ->
  * existing TypeScript AccessibilityOfferParser.
  *
- * Important: on Xiaomi the Uber offer can be visually over com.miui.home.
- * Therefore we cannot require event.packageName == com.ubercab.driver.
- * We observe launcher events too and verify whether an Uber accessibility window exists.
- *
- * Raw screenshots are never persisted. Address/name-only OCR lines are discarded.
+ * When the OCR has enough information to calculate the COMPLETE offer
+ * (pickup + trip), this service also renders a non-touchable accessibility
+ * overlay with the decision metrics. No raw screenshots are persisted.
  */
 class RideAccessibilityService : AccessibilityService() {
   companion object {
     private const val UBER_PACKAGE = "com.ubercab.driver"
     private val LAUNCHER_PACKAGES = setOf("com.miui.home", "com.android.launcher3")
 
-    private const val MIN_CAPTURE_INTERVAL_MS = 900L
+    private const val MIN_CAPTURE_INTERVAL_MS = 550L
     private const val RECENT_UBER_SIGNAL_TTL_MS = 3_000L
     private const val MAX_OCR_LINES = 48
     private const val MAX_LINE_CHARS = 180
+    private const val OVERLAY_VISIBLE_MS = 8_000L
+    private const val OVERLAY_DEDUPE_MS = 30_000L
+
+    // Initial thresholds copied from the driver's current configuration.
+    private const val GREEN_PER_KM = 2.10
+    private const val YELLOW_PER_KM = 1.70
+    private const val GREEN_PER_HOUR = 46.0
+    private const val YELLOW_PER_HOUR = 35.0
 
     private val OPERATIONAL_PATTERNS = listOf(
       Regex("""(?:R\$|RS|R5)\s*[+]?\s*[0-9]{1,5}(?:[.,][0-9]{1,3})?""", RegexOption.IGNORE_CASE),
       Regex("""[0-9]+(?:[.,][0-9]+)?\s*km\b""", RegexOption.IGNORE_CASE),
       Regex("""[0-9]+(?:[.,][0-9]+)?\s*m\b""", RegexOption.IGNORE_CASE),
       Regex("""[0-9]+(?:[.,][0-9]+)?\s*(?:min|minuto|minutos)\b""", RegexOption.IGNORE_CASE),
-      Regex("""\bUberX\b|\bComfort\b|\bBlack\b|\bPop\b|\bExclusivo\b""", RegexOption.IGNORE_CASE),
+      Regex("""\bUberX\b|\bComfort\b|\bBlack\b|\bPop\b|\bPriority\b|\bExclusivo\b""", RegexOption.IGNORE_CASE),
       Regex("""\bAceitar\b|\bRecusar\b|\boferta\b|\bnova corrida\b|\bsolicita[cç][aã]o\b""", RegexOption.IGNORE_CASE),
+      Regex("""\bparada(?:s)?\b""", RegexOption.IGNORE_CASE),
       Regex("""\b[1-5][.,][0-9]{1,2}\s*(?:\([0-9]+\))?""", RegexOption.IGNORE_CASE)
+    )
+
+    private val FARE_REGEX = Regex(
+      """(?:R\$|RS|R5)\s*([0-9]{1,5}(?:[.,][0-9]{1,2})?)""",
+      RegexOption.IGNORE_CASE
+    )
+    private val TIME_REGEX = Regex(
+      """([0-9]{1,3})\s*(?:min|minuto|minutos)\b""",
+      RegexOption.IGNORE_CASE
+    )
+    private val DISTANCE_REGEX = Regex(
+      """([0-9]{1,3}(?:[.,][0-9]+)?)\s*km\b""",
+      RegexOption.IGNORE_CASE
     )
   }
 
@@ -59,9 +90,26 @@ class RideAccessibilityService : AccessibilityService() {
     val active: Boolean
   )
 
+  private data class DecisionOverlayData(
+    val fare: Double,
+    val totalKm: Double,
+    val totalMinutes: Int,
+    val reaisPerKm: Double,
+    val reaisPerHour: Double,
+    val semaphore: String,
+    val hasStops: Boolean,
+    val signature: String
+  )
+
   private val lastCaptureAt = AtomicLong(0L)
   private val lastUberSignalAt = AtomicLong(0L)
   private val captureInFlight = AtomicBoolean(false)
+  private val overlayHandler = Handler(Looper.getMainLooper())
+  private var overlayView: View? = null
+  private var overlayHideRunnable: Runnable? = null
+  private var lastOverlaySignature: String? = null
+  private var lastOverlayAt: Long = 0L
+
   private val recognizer by lazy {
     TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
   }
@@ -104,6 +152,7 @@ class RideAccessibilityService : AccessibilityService() {
   override fun onInterrupt() {}
 
   override fun onDestroy() {
+    hideDecisionOverlay()
     try { recognizer.close() } catch (_: Exception) {}
     super.onDestroy()
   }
@@ -235,6 +284,7 @@ class RideAccessibilityService : AccessibilityService() {
     recognizer.process(image)
       .addOnSuccessListener { result ->
         try {
+          extractDecisionOverlayData(result)?.let { showDecisionOverlay(it) }
           persistOcrResult(event, uberWindow, triggerPackage, result, width, height)
         } catch (_: Exception) {
           persistStatus(event, uberWindow, triggerPackage, "OCR_PROBE: RESULT_PROCESSING_ERROR")
@@ -256,6 +306,218 @@ class RideAccessibilityService : AccessibilityService() {
           captureInFlight.set(false)
         }
       }
+  }
+
+  /**
+   * Build decision data only from a COMPLETE Uber card.
+   * We require at least two time-distance route legs so a partial OCR frame cannot
+   * be mistaken for the total. The normal card has pickup + passenger trip; cards
+   * with an intermediate stop may expose more legs and all legs are summed.
+   */
+  private fun extractDecisionOverlayData(result: Text): DecisionOverlayData? {
+    val lines = mutableListOf<String>()
+    for (block in result.textBlocks) {
+      for (line in block.lines) {
+        val value = line.text.trim()
+        if (value.isNotBlank()) lines.add(value)
+      }
+    }
+
+    val fare = lines.asSequence()
+      .filterNot { line ->
+        val normalized = normalize(line)
+        normalized.contains("/km") ||
+          normalized.contains("aprox") ||
+          normalized.contains("incluido") ||
+          normalized.contains("incluído") ||
+          normalized.trimStart().startsWith("+")
+      }
+      .mapNotNull { line -> FARE_REGEX.find(line)?.groupValues?.getOrNull(1)?.let(::parseDecimal) }
+      .firstOrNull { it > 0.0 }
+      ?: return null
+
+    val routeTimes = mutableListOf<Int>()
+    val routeDistances = mutableListOf<Double>()
+
+    for (line in lines) {
+      val normalized = normalize(line)
+      if (normalized.contains("/km") || normalized.contains("aprox")) continue
+
+      val time = TIME_REGEX.find(line)?.groupValues?.getOrNull(1)?.toIntOrNull()
+      val distance = DISTANCE_REGEX.find(line)?.groupValues?.getOrNull(1)?.let(::parseDecimal)
+      if (time != null && time > 0 && distance != null && distance > 0.0) {
+        routeTimes.add(time)
+        routeDistances.add(distance)
+      }
+    }
+
+    // Safety first: do not show a decision from an incomplete frame.
+    if (routeTimes.size < 2 || routeDistances.size < 2) return null
+
+    val totalMinutes = routeTimes.sum()
+    val totalKm = routeDistances.sum()
+    if (totalMinutes <= 0 || totalKm <= 0.0) return null
+
+    val reaisPerKm = fare / totalKm
+    val reaisPerHour = fare / (totalMinutes / 60.0)
+    val semaphore = when {
+      reaisPerKm >= GREEN_PER_KM && reaisPerHour >= GREEN_PER_HOUR -> "green"
+      reaisPerKm < YELLOW_PER_KM || reaisPerHour < YELLOW_PER_HOUR -> "red"
+      else -> "yellow"
+    }
+
+    val hasStops = routeDistances.size > 2 || lines.any {
+      Regex("""\bparada(?:s)?\b""", RegexOption.IGNORE_CASE).containsMatchIn(it)
+    }
+
+    val signature = listOf(
+      (fare * 100).toInt().toString(),
+      String.format(Locale.US, "%.2f", totalKm),
+      totalMinutes.toString(),
+      hasStops.toString()
+    ).joinToString("|")
+
+    return DecisionOverlayData(
+      fare = fare,
+      totalKm = totalKm,
+      totalMinutes = totalMinutes,
+      reaisPerKm = reaisPerKm,
+      reaisPerHour = reaisPerHour,
+      semaphore = semaphore,
+      hasStops = hasStops,
+      signature = signature
+    )
+  }
+
+  private fun parseDecimal(value: String): Double? {
+    return value.replace(".", "").replace(',', '.').toDoubleOrNull()
+  }
+
+  private fun showDecisionOverlay(data: DecisionOverlayData) {
+    val now = System.currentTimeMillis()
+    if (data.signature == lastOverlaySignature && now - lastOverlayAt <= OVERLAY_DEDUPE_MS) {
+      return
+    }
+    lastOverlaySignature = data.signature
+    lastOverlayAt = now
+
+    overlayHandler.post {
+      hideDecisionOverlay()
+
+      val windowManager = getSystemService(WINDOW_SERVICE) as WindowManager
+      val borderColor = when (data.semaphore) {
+        "green" -> Color.rgb(28, 185, 84)
+        "red" -> Color.rgb(234, 67, 53)
+        else -> Color.rgb(251, 188, 4)
+      }
+
+      val root = LinearLayout(this).apply {
+        orientation = LinearLayout.VERTICAL
+        setPadding(dp(14), dp(10), dp(14), dp(9))
+        background = GradientDrawable().apply {
+          shape = GradientDrawable.RECTANGLE
+          cornerRadius = dp(14).toFloat()
+          setColor(Color.WHITE)
+          setStroke(dp(5), borderColor)
+        }
+        elevation = dp(10).toFloat()
+      }
+
+      val metricsRow = LinearLayout(this).apply {
+        orientation = LinearLayout.HORIZONTAL
+        gravity = Gravity.CENTER_VERTICAL
+      }
+
+      metricsRow.addView(metricColumn("R$/Km", format2(data.reaisPerKm), borderColor), weightedParams())
+      metricsRow.addView(metricColumn("R$/Hora", format2(data.reaisPerHour), borderColor), weightedParams())
+      metricsRow.addView(metricColumn("Sinal", "●", borderColor, true), weightedParams())
+      root.addView(metricsRow)
+
+      val routeSummary = buildString {
+        append(data.totalMinutes).append("min • ")
+        append(format1(data.totalKm)).append("km")
+        if (data.hasStops) append(" • PAR")
+      }
+
+      root.addView(TextView(this).apply {
+        text = routeSummary
+        setTextColor(Color.rgb(20, 20, 20))
+        textSize = 19f
+        setTypeface(typeface, android.graphics.Typeface.BOLD)
+        setPadding(dp(4), dp(5), dp(4), 0)
+      })
+
+      val width = (resources.displayMetrics.widthPixels * 0.82f).toInt()
+      val params = WindowManager.LayoutParams(
+        width,
+        WindowManager.LayoutParams.WRAP_CONTENT,
+        WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
+        WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+          WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
+          WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+        PixelFormat.TRANSLUCENT
+      ).apply {
+        gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
+        y = dp(70)
+      }
+
+      try {
+        windowManager.addView(root, params)
+        overlayView = root
+
+        val hide = Runnable { hideDecisionOverlay() }
+        overlayHideRunnable = hide
+        overlayHandler.postDelayed(hide, OVERLAY_VISIBLE_MS)
+      } catch (_: Exception) {
+        overlayView = null
+      }
+    }
+  }
+
+  private fun metricColumn(label: String, value: String, accent: Int, semaphoreDot: Boolean = false): LinearLayout {
+    return LinearLayout(this).apply {
+      orientation = LinearLayout.VERTICAL
+      setPadding(dp(5), 0, dp(5), 0)
+      addView(TextView(this@RideAccessibilityService).apply {
+        text = label
+        setTextColor(Color.rgb(110, 110, 110))
+        textSize = 13f
+      })
+      addView(TextView(this@RideAccessibilityService).apply {
+        text = value
+        setTextColor(if (semaphoreDot) accent else Color.BLACK)
+        textSize = if (semaphoreDot) 34f else 27f
+        setTypeface(typeface, android.graphics.Typeface.BOLD)
+      })
+    }
+  }
+
+  private fun weightedParams(): LinearLayout.LayoutParams {
+    return LinearLayout.LayoutParams(0, WindowManager.LayoutParams.WRAP_CONTENT, 1f)
+  }
+
+  private fun hideDecisionOverlay() {
+    overlayHideRunnable?.let { overlayHandler.removeCallbacks(it) }
+    overlayHideRunnable = null
+    val current = overlayView ?: return
+    overlayView = null
+    try {
+      val windowManager = getSystemService(WINDOW_SERVICE) as WindowManager
+      windowManager.removeView(current)
+    } catch (_: Exception) {
+    }
+  }
+
+  private fun dp(value: Int): Int {
+    return (value * resources.displayMetrics.density).toInt()
+  }
+
+  private fun format1(value: Double): String {
+    return String.format(Locale.US, "%.1f", value).replace('.', ',')
+  }
+
+  private fun format2(value: Double): String {
+    return String.format(Locale.US, "%.2f", value).replace('.', ',')
   }
 
   private fun persistOcrResult(
