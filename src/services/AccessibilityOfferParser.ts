@@ -368,7 +368,17 @@ export function parseAccessibilitySnapshot(snapshot: AccessibilitySnapshot): Raw
   if (!amountPick || amountPick.amount <= 0) return null;
 
   const legs = pairLegs(metrics);
-  const isOcrSnapshot = nodes.some((n) => n.origin === "screenshotOcr");
+
+  // 99 frequently exposes promotional snippets such as "+R$ 5 extra por solicitação".
+  // They are not ride offers. A valid 99 offer must contain both complete route legs:
+  // pickup time+distance and trip time+distance. Keep Uber behavior untouched.
+  if (platform === "99") {
+    const hasCompletePickup = legs.pickupDurationMinutes != null && legs.pickupDistanceKm != null;
+    const hasCompleteTrip = legs.tripDurationMinutes != null && legs.tripDistanceKm != null;
+    if (!hasCompletePickup || !hasCompleteTrip) return null;
+  }
+
+  const isOcrSnapshot = nodes.some((n) => (n.origin ?? "").startsWith("screenshotOcr"));
 
   let confidence = isOcrSnapshot ? 0.78 : 0.72;
   confidence -= amountPick.confidencePenalty;
