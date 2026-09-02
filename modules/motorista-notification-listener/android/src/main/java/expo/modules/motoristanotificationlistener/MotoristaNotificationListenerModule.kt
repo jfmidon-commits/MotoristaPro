@@ -40,7 +40,12 @@ class MotoristaNotificationListenerModule : Module() {
 
     Function("getAccessibilityPermissionStatus") {
       val context = appContext.reactContext ?: return@Function "unavailable"
-      if (isAccessibilityServiceEnabled(context)) "granted" else "denied"
+      if (isAccessibilityServiceEnabled(context, "RideAccessibilityService")) "granted" else "denied"
+    }
+
+    Function("getRideLifecyclePermissionStatus") {
+      val context = appContext.reactContext ?: return@Function "unavailable"
+      if (isAccessibilityServiceEnabled(context, "RideLifecycleAccessibilityService")) "granted" else "denied"
     }
 
     Function("openAccessibilitySettings") {
@@ -62,18 +67,27 @@ class MotoristaNotificationListenerModule : Module() {
       RideAccessibilityStore.clear(context)
       true
     }
+
+    Function("getPendingRideLifecycleEventsJson") {
+      val context = appContext.reactContext ?: return@Function "[]"
+      RideLifecycleStore.read(context)
+    }
+
+    Function("clearPendingRideLifecycleEvents") {
+      val context = appContext.reactContext ?: return@Function false
+      RideLifecycleStore.clear(context)
+      true
+    }
   }
 
-  private fun isAccessibilityServiceEnabled(context: Context): Boolean {
+  private fun isAccessibilityServiceEnabled(context: Context, serviceSuffix: String): Boolean {
     val am = context.getSystemService(Context.ACCESSIBILITY_SERVICE) as? AccessibilityManager
       ?: return false
     val enabled = am.getEnabledAccessibilityServiceList(AccessibilityServiceInfo.FEEDBACK_GENERIC)
       ?: return false
-    val expected = "${context.packageName}/${RideAccessibilityService::class.java.canonicalName}"
-    val expectedShort = "${context.packageName}/.RideAccessibilityService"
     return enabled.any { info ->
       val id = info.id ?: return@any false
-      id == expected || id.endsWith("RideAccessibilityService") || id == expectedShort
+      id.contains(context.packageName) && id.endsWith(serviceSuffix)
     }
   }
 }
