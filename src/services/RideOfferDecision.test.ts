@@ -38,7 +38,7 @@ describe("RideOfferDecision", () => {
     };
 
     expect(classifyOffer(offer(), thresholds)).toBe("green");
-    expect(classifyOffer(offer({ offeredAmountCents: 500 }), thresholds)).toBe("yellow");
+    expect(classifyOffer(offer({ offeredAmountCents: 550 }), thresholds)).toBe("yellow");
     expect(classifyOffer(offer({ offeredAmountCents: 300 }), thresholds)).toBe("red");
     expect(classifyOffer(offer(), null)).toBe("green");
   });
