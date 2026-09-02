@@ -176,7 +176,12 @@ describe("AccessibilityOfferParser", () => {
 
   it("ignora saldo, bônus e promoção maiores que a oferta", () => {
     for (const extra of ["Saldo R$ 342,10", "Bônus R$ 25,00", "Promoção R$ 30,00"]) {
-      const s = snap("com.app99.driver", [node(extra), node("R$ 18,00", 40), node("3 min", 80), node("2 km", 80, 80), node("Pop"), node("Aceitar", 150, 20, { clickable: true })]);
+      const s = snap("com.app99.driver", [
+        node(extra), node("R$ 18,00", 40),
+        node("3 min", 80), node("2 km", 80, 80),
+        node("7 min", 120), node("3 km", 120, 80),
+        node("Pop"), node("Aceitar", 170, 20, { clickable: true })
+      ]);
       expect(parseAccessibilitySnapshot(s)!.offeredAmount).toBe(18);
     }
   });
@@ -184,7 +189,9 @@ describe("AccessibilityOfferParser", () => {
   it("exclui tarifas 99 antes/depois do total", () => {
     const s = snap("com.app99.driver", [
       node("R$ 4,83 Tarifa Expresso"), node("R$ 20,03", 50), node("R$ 2,89 Tarifa base dinâmica", 70),
-      node("2 min", 100), node("1 km", 100, 80), node("Pop"), node("Aceitar", 200, 20, { clickable: true })
+      node("2 min", 100), node("1 km", 100, 80),
+      node("8 min", 140), node("4 km", 140, 80),
+      node("Pop"), node("Aceitar", 200, 20, { clickable: true })
     ]);
     expect(parseAccessibilitySnapshot(s)!.offeredAmount).toBe(20.03);
   });
