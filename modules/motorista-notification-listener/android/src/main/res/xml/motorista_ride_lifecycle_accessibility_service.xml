@@ -5,5 +5,4 @@
   android:notificationTimeout="100"
   android:canRetrieveWindowContent="true"
   android:accessibilityFlags="flagReportViewIds|flagRetrieveInteractiveWindows|flagIncludeNotImportantViews"
-  android:packageNames="com.ubercab.driver,com.app99.driver"
-  android:description="@string/app_name" />
+  android:packageNames="com.ubercab.driver,com.app99.driver" />
