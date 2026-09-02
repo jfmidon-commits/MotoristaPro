@@ -46,8 +46,9 @@ class RideAccessibilityService : AccessibilityService() {
     private const val MIN_CAPTURE_INTERVAL_MS = 500L
     private const val MAX_OCR_LINES = 64
     private const val MAX_LINE_CHARS = 220
-    private const val OVERLAY_VISIBLE_MS = 8_000L
+    private const val OVERLAY_STALE_MS = 2_500L
     private const val OVERLAY_DEDUPE_MS = 20_000L
+    private const val NO_OFFER_FRAMES_TO_HIDE = 2
 
     private const val GREEN_PER_KM = 2.10
     private const val YELLOW_PER_KM = 1.70
@@ -146,6 +147,7 @@ class RideAccessibilityService : AccessibilityService() {
   private var overlayHideRunnable: Runnable? = null
   private var lastOverlaySignature: String? = null
   private var lastOverlayAt: Long = 0L
+  private var consecutiveNoOfferFrames = 0
 
   private val recognizer by lazy {
     TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
@@ -291,8 +293,9 @@ class RideAccessibilityService : AccessibilityService() {
         try {
           val card = extractCurrentOfferCard(result)
           if (card == null) {
-            persistStatus(event, uberWindow, "OCR_PROBE: NO_CURRENT_OFFER_CARD")
+            handleNoCurrentOffer(event, uberWindow)
           } else {
+            consecutiveNoOfferFrames = 0
             val extraction = extractDecisionOverlayData(card)
             if (extraction.data != null) showDecisionOverlay(extraction.data)
             else persistStatus(event, uberWindow, "OCR_PROBE: DECISION_REJECTED ${extraction.reason}")
@@ -312,6 +315,19 @@ class RideAccessibilityService : AccessibilityService() {
           captureInFlight.set(false)
         }
       }
+  }
+
+  private fun handleNoCurrentOffer(event: AccessibilityEvent, uberWindow: UberWindowSignal?) {
+    consecutiveNoOfferFrames += 1
+    if (consecutiveNoOfferFrames >= NO_OFFER_FRAMES_TO_HIDE) {
+      hideDecisionOverlay()
+      lastOverlaySignature = null
+      lastOverlayAt = 0L
+      consecutiveNoOfferFrames = 0
+      persistStatus(event, uberWindow, "OCR_PROBE: OFFER_CLEARED")
+    } else {
+      persistStatus(event, uberWindow, "OCR_PROBE: NO_CURRENT_OFFER_CARD")
+    }
   }
 
   private fun extractCurrentOfferCard(result: Text): OfferCard? {
@@ -511,7 +527,11 @@ class RideAccessibilityService : AccessibilityService() {
 
   private fun showDecisionOverlay(data: DecisionOverlayData) {
     val now = System.currentTimeMillis()
-    if (data.signature == lastOverlaySignature && now - lastOverlayAt <= OVERLAY_DEDUPE_MS) return
+    if (data.signature == lastOverlaySignature && overlayView != null && now - lastOverlayAt <= OVERLAY_DEDUPE_MS) {
+      lastOverlayAt = now
+      refreshOverlayExpiry()
+      return
+    }
     lastOverlaySignature = data.signature
     lastOverlayAt = now
 
@@ -575,12 +595,23 @@ class RideAccessibilityService : AccessibilityService() {
       try {
         windowManager.addView(root, params)
         overlayView = root
-        val hide = Runnable { hideDecisionOverlay() }
-        overlayHideRunnable = hide
-        overlayHandler.postDelayed(hide, OVERLAY_VISIBLE_MS)
+        scheduleOverlayExpiry()
       } catch (_: Exception) {
         overlayView = null
       }
+    }
+  }
+
+  private fun scheduleOverlayExpiry() {
+    overlayHideRunnable?.let { overlayHandler.removeCallbacks(it) }
+    val hide = Runnable { hideDecisionOverlay() }
+    overlayHideRunnable = hide
+    overlayHandler.postDelayed(hide, OVERLAY_STALE_MS)
+  }
+
+  private fun refreshOverlayExpiry() {
+    overlayHandler.post {
+      if (overlayView != null) scheduleOverlayExpiry()
     }
   }
 
