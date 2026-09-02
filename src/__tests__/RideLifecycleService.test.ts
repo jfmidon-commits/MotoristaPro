@@ -1,17 +1,4 @@
-jest.mock("@/services/RideOfferService", () => ({
-  getRideOfferById: jest.fn()
-}));
-
-jest.mock("@/services/RideResultService", () => ({
-  addRideResult: jest.fn(),
-  getRideResultByOfferId: jest.fn()
-}));
-
-jest.mock("@/services/TransactionService", () => ({
-  addTransaction: jest.fn()
-}));
-
-import { incomeCategoryForPlatform, paymentMethodLabel } from "@/services/RideLifecycleService";
+import { incomeCategoryForPlatform, paymentMethodLabel } from "@/services/RideLifecycleLabels";
 
 describe("RideLifecycleService helpers", () => {
   test("maps quick payment choices to driver-facing labels", () => {
