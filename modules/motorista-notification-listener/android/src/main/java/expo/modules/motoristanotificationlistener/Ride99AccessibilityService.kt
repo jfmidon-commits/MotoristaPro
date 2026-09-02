@@ -31,6 +31,7 @@ class Ride99AccessibilityService : AccessibilityService() {
   companion object {
     private const val PACKAGE_99 = "com.app99.driver"
     private const val MIN_CAPTURE_INTERVAL_MS = 450L
+    private const val FOREGROUND_POLL_INTERVAL_MS = 1_200L
     private const val OVERLAY_VISIBLE_MS = 8_000L
     private const val OVERLAY_DEDUPE_MS = 20_000L
     private const val MAX_OCR_LINES = 48
@@ -55,23 +56,86 @@ class Ride99AccessibilityService : AccessibilityService() {
   private val lastCaptureAt = AtomicLong(0L)
   private val captureInFlight = AtomicBoolean(false)
   private val overlayHandler = Handler(Looper.getMainLooper())
+  private val foregroundPollHandler = Handler(Looper.getMainLooper())
   private var overlayView: View? = null
   private var overlayHideRunnable: Runnable? = null
   private var lastOverlaySignature: String? = null
   private var lastOverlayAt: Long = 0L
+  private var last99Event: AccessibilityEvent? = null
   private val recognizer by lazy { TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS) }
+
+  private val foregroundPollRunnable = object : Runnable {
+    override fun run() {
+      try {
+        if (is99Foreground()) {
+          val event = last99Event ?: AccessibilityEvent.obtain(AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED).also {
+            it.packageName = PACKAGE_99
+            last99Event = it
+          }
+          requestCapture(event)
+        }
+      } catch (_: Exception) {
+        // Polling is only a reliability fallback. Event-driven capture remains active.
+      } finally {
+        foregroundPollHandler.postDelayed(this, FOREGROUND_POLL_INTERVAL_MS)
+      }
+    }
+  }
+
+  override fun onServiceConnected() {
+    super.onServiceConnected()
+    foregroundPollHandler.removeCallbacks(foregroundPollRunnable)
+    foregroundPollHandler.post(foregroundPollRunnable)
+  }
 
   override fun onAccessibilityEvent(event: AccessibilityEvent?) {
     if (event == null || !isRelevantEventType(event.eventType)) return
     if (event.packageName?.toString()?.lowercase() != PACKAGE_99) return
+    remember99Event(event)
+    requestCapture(last99Event ?: event)
+  }
+
+  override fun onInterrupt() {}
+
+  override fun onDestroy() {
+    foregroundPollHandler.removeCallbacks(foregroundPollRunnable)
+    hideDecisionOverlay()
+    try { last99Event?.recycle() } catch (_: Exception) {}
+    last99Event = null
+    try { recognizer.close() } catch (_: Exception) {}
+    super.onDestroy()
+  }
+
+  private fun remember99Event(event: AccessibilityEvent) {
+    val copy = AccessibilityEvent.obtain(event)
+    try { last99Event?.recycle() } catch (_: Exception) {}
+    last99Event = copy
+  }
+
+  private fun is99Foreground(): Boolean {
+    val activePackage = rootInActiveWindow?.packageName?.toString()?.lowercase()
+    if (activePackage == PACKAGE_99) return true
+    return try {
+      windows.any { window ->
+        window.isActive && window.root?.packageName?.toString()?.lowercase() == PACKAGE_99
+      }
+    } catch (_: Exception) {
+      false
+    }
+  }
+
+  private fun requestCapture(event: AccessibilityEvent) {
     val now = System.currentTimeMillis()
     val previous = lastCaptureAt.get()
     if (now - previous < MIN_CAPTURE_INTERVAL_MS || !lastCaptureAt.compareAndSet(previous, now) || !captureInFlight.compareAndSet(false, true)) return
-    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) { persistStatus(event, "OCR_99: UNSUPPORTED_API"); captureInFlight.set(false); return }
+    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
+      persistStatus(event, "OCR_99: UNSUPPORTED_API")
+      captureInFlight.set(false)
+      return
+    }
     takeDisplayScreenshot(event)
   }
-  override fun onInterrupt() {}
-  override fun onDestroy() { hideDecisionOverlay(); try { recognizer.close() } catch (_: Exception) {}; super.onDestroy() }
+
   private fun isRelevantEventType(t: Int) = t == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED || t == AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED || t == AccessibilityEvent.TYPE_WINDOWS_CHANGED || t == AccessibilityEvent.TYPE_VIEW_SCROLLED
 
   private fun takeDisplayScreenshot(event: AccessibilityEvent) {
