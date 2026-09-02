@@ -41,16 +41,21 @@ export function classifyOffer(
   offer: NormalizedRideOffer,
   thresholds: OfferDecisionThresholds | null = DEFAULT_OFFER_DECISION_THRESHOLDS
 ): OfferSemaphore {
-  if (!thresholds) return "neutral";
-
+  const activeThresholds = thresholds ?? DEFAULT_OFFER_DECISION_THRESHOLDS;
   const { reaisPerKm, reaisPerHour } = calculateOfferEconomics(offer);
   if (reaisPerKm == null || reaisPerHour == null) return "neutral";
 
-  if (reaisPerKm >= thresholds.greenPerKm && reaisPerHour >= thresholds.greenPerHour) {
+  if (
+    reaisPerKm >= activeThresholds.greenPerKm &&
+    reaisPerHour >= activeThresholds.greenPerHour
+  ) {
     return "green";
   }
 
-  if (reaisPerKm < thresholds.yellowPerKm || reaisPerHour < thresholds.yellowPerHour) {
+  if (
+    reaisPerKm < activeThresholds.yellowPerKm ||
+    reaisPerHour < activeThresholds.yellowPerHour
+  ) {
     return "red";
   }
 
