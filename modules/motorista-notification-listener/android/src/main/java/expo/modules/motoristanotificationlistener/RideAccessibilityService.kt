@@ -30,67 +30,78 @@ import kotlin.math.abs
 import kotlin.math.max
 
 /**
- * EXPERIMENTAL BRANCH ONLY.
+ * Experimental Uber offer reader.
  *
- * Important invariant: every decision is built from ONE current Uber offer card.
- * We never sum route legs from the whole screenshot. The parser first anchors the
- * card by its action button (Aceitar/Selecionar), then chooses the main fare and
- * only reads route legs spatially inside that same card.
+ * Rules:
+ * - every decision comes from ONE currently visible Uber card;
+ * - Aceitar/Selecionar anchors the bottom of the card;
+ * - the largest eligible R$ line is the fare;
+ * - route legs are read only between fare and action button;
+ * - hour durations such as "1 h e 4 min" are converted to 64 minutes;
+ * - mixed/contaminated frames are rejected instead of guessed.
  */
 class RideAccessibilityService : AccessibilityService() {
   companion object {
     private const val UBER_PACKAGE = "com.ubercab.driver"
-
-    private const val MIN_CAPTURE_INTERVAL_MS = 550L
-    private const val MAX_OCR_LINES = 48
-    private const val MAX_LINE_CHARS = 180
+    private const val MIN_CAPTURE_INTERVAL_MS = 500L
+    private const val MAX_OCR_LINES = 64
+    private const val MAX_LINE_CHARS = 220
     private const val OVERLAY_VISIBLE_MS = 8_000L
-    private const val OVERLAY_DEDUPE_MS = 30_000L
+    private const val OVERLAY_DEDUPE_MS = 20_000L
 
-    // Initial thresholds copied from the driver's current configuration.
     private const val GREEN_PER_KM = 2.10
     private const val YELLOW_PER_KM = 1.70
     private const val GREEN_PER_HOUR = 46.0
     private const val YELLOW_PER_HOUR = 35.0
 
-    private const val MIN_UBER_WINDOW_AREA_RATIO = 0.10
-    private const val MIN_UBER_WINDOW_WIDTH_RATIO = 0.45
-    private const val MIN_UBER_WINDOW_HEIGHT_RATIO = 0.14
-
-    private val OPERATIONAL_PATTERNS = listOf(
-      Regex("""(?:R\$|RS|R5)\s*[+]?\s*[0-9]{1,5}(?:[.,][0-9]{1,3})?""", RegexOption.IGNORE_CASE),
-      Regex("""[0-9]+(?:[.,][0-9]+)?\s*km\b""", RegexOption.IGNORE_CASE),
-      Regex("""[0-9]+(?:[.,][0-9]+)?\s*m\b""", RegexOption.IGNORE_CASE),
-      Regex("""[0-9]+(?:[.,][0-9]+)?\s*(?:min|minuto|minutos)\b""", RegexOption.IGNORE_CASE),
-      Regex("""\bUberX\b|\bComfort\b|\bBlack\b|\bPop\b|\bPriority\b|\bExclusivo\b""", RegexOption.IGNORE_CASE),
-      Regex("""\bAceitar\b|\bSelecionar\b|\bRecusar\b""", RegexOption.IGNORE_CASE),
-      Regex("""\bparada(?:s)?\b""", RegexOption.IGNORE_CASE),
-      Regex("""\b[1-5][.,][0-9]{1,2}\s*(?:\([0-9]+\))?""", RegexOption.IGNORE_CASE)
-    )
+    private const val MIN_UBER_WINDOW_AREA_RATIO = 0.08
+    private const val MIN_UBER_WINDOW_WIDTH_RATIO = 0.40
+    private const val MIN_UBER_WINDOW_HEIGHT_RATIO = 0.12
 
     private val FARE_REGEX = Regex(
       """(?:R\$|RS|R5)\s*([0-9]{1,5}(?:[.,][0-9]{1,2})?)""",
       RegexOption.IGNORE_CASE
     )
-    private val TIME_REGEX = Regex(
-      """([0-9]{1,3})\s*(?:min|minuto|minutos)\b""",
-      RegexOption.IGNORE_CASE
-    )
+
     private val DISTANCE_REGEX = Regex(
       """([0-9]{1,3}(?:[.,][0-9]+)?)\s*km\b""",
       RegexOption.IGNORE_CASE
     )
+
+    private val MINUTE_REGEX = Regex(
+      """([0-9]{1,3})\s*(?:min|minuto|minutos)\b""",
+      RegexOption.IGNORE_CASE
+    )
+
+    private val HOUR_MINUTE_REGEX = Regex(
+      """([0-9]{1,2})\s*(?:h|hora|horas)\b(?:\s*(?:e)?\s*([0-9]{1,2})\s*(?:min|minuto|minutos)\b)?""",
+      RegexOption.IGNORE_CASE
+    )
+
     private val APPROX_PER_KM_REGEX = Regex(
       """(?:R\$|RS|R5)?\s*([0-9]{1,3}(?:[.,][0-9]{1,2})?)\s*/\s*km""",
       RegexOption.IGNORE_CASE
     )
+
     private val ACTION_REGEX = Regex(
       """\b(?:Aceitar|Selecionar)\b""",
       RegexOption.IGNORE_CASE
     )
+
     private val STOP_REGEX = Regex(
       """\bparada(?:s)?\b""",
       RegexOption.IGNORE_CASE
+    )
+
+    private val OPERATIONAL_PATTERNS = listOf(
+      Regex("""(?:R\$|RS|R5)\s*[+]?\s*[0-9]{1,5}(?:[.,][0-9]{1,3})?""", RegexOption.IGNORE_CASE),
+      Regex("""[0-9]+(?:[.,][0-9]+)?\s*km\b""", RegexOption.IGNORE_CASE),
+      Regex("""[0-9]+\s*(?:min|minuto|minutos)\b""", RegexOption.IGNORE_CASE),
+      Regex("""[0-9]+\s*(?:h|hora|horas)\b(?:\s*(?:e)?\s*[0-9]+\s*(?:min|minuto|minutos)\b)?""", RegexOption.IGNORE_CASE),
+      Regex("""\bUberX\b|\bComfort\b|\bBlack\b|\bPop\b|\bPriority\b|\bExclusivo\b""", RegexOption.IGNORE_CASE),
+      Regex("""\bAceitar\b|\bSelecionar\b|\bRecusar\b""", RegexOption.IGNORE_CASE),
+      Regex("""\bparada(?:s)?\b|\bviagem longa\b""", RegexOption.IGNORE_CASE),
+      Regex("""\b[1-5][.,][0-9]{1,2}\s*(?:\([0-9]+\))?""", RegexOption.IGNORE_CASE)
     )
   }
 
@@ -102,10 +113,7 @@ class RideAccessibilityService : AccessibilityService() {
     val active: Boolean
   )
 
-  private data class OcrLineRecord(
-    val text: String,
-    val bounds: Rect
-  )
+  private data class OcrLineRecord(val text: String, val bounds: Rect)
 
   private data class OfferCard(
     val lines: List<OcrLineRecord>,
@@ -113,11 +121,7 @@ class RideAccessibilityService : AccessibilityService() {
     val actionLine: OcrLineRecord
   )
 
-  private data class RouteLeg(
-    val minutes: Int,
-    val km: Double,
-    val top: Int
-  )
+  private data class RouteLeg(val minutes: Int, val km: Double, val top: Int)
 
   private data class DecisionOverlayData(
     val fare: Double,
@@ -128,6 +132,11 @@ class RideAccessibilityService : AccessibilityService() {
     val semaphore: String,
     val hasStops: Boolean,
     val signature: String
+  )
+
+  private data class DecisionExtraction(
+    val data: DecisionOverlayData?,
+    val reason: String
   )
 
   private val lastCaptureAt = AtomicLong(0L)
@@ -145,9 +154,6 @@ class RideAccessibilityService : AccessibilityService() {
   override fun onAccessibilityEvent(event: AccessibilityEvent?) {
     if (event == null || !isRelevantEventType(event.eventType)) return
 
-    // A tiny Uber bubble is NOT an offer. We only OCR when a materially-sized
-    // Uber window is present. This prevents gallery/diagnostic screens behind the
-    // bubble from being mistaken for a current ride offer.
     val uberWindow = findBestUberWindow()
     if (!isOfferSizedUberWindow(uberWindow)) return
 
@@ -199,17 +205,13 @@ class RideAccessibilityService : AccessibilityService() {
             focused = window.isFocused,
             active = window.isActive
           )
-
-          if (best == null || safeArea(candidate.bounds) > safeArea(best!!.bounds)) {
-            best = candidate
-          }
+          if (best == null || safeArea(candidate.bounds) > safeArea(best!!.bounds)) best = candidate
         } finally {
           try { root?.recycle() } catch (_: Exception) {}
           root = null
         }
       }
-    } catch (_: Exception) {
-    }
+    } catch (_: Exception) {}
     return best
   }
 
@@ -247,14 +249,12 @@ class RideAccessibilityService : AccessibilityService() {
                 captureInFlight.set(false)
                 return
               }
-
               softwareBitmap = hardwareBitmap.copy(Bitmap.Config.ARGB_8888, false)
               if (softwareBitmap == null) {
                 persistStatus(event, uberWindow, "OCR_PROBE: BITMAP_COPY_FAILED")
                 captureInFlight.set(false)
                 return
               }
-
               processBitmap(event, uberWindow, softwareBitmap)
             } catch (_: Exception) {
               try { softwareBitmap?.recycle() } catch (_: Exception) {}
@@ -267,11 +267,8 @@ class RideAccessibilityService : AccessibilityService() {
           }
 
           override fun onFailure(errorCode: Int) {
-            try {
-              persistStatus(event, uberWindow, "OCR_PROBE: ${mapError(errorCode)} code=$errorCode")
-            } finally {
-              captureInFlight.set(false)
-            }
+            try { persistStatus(event, uberWindow, "OCR_PROBE: ${mapError(errorCode)} code=$errorCode") }
+            finally { captureInFlight.set(false) }
           }
         }
       )
@@ -284,11 +281,7 @@ class RideAccessibilityService : AccessibilityService() {
     }
   }
 
-  private fun processBitmap(
-    event: AccessibilityEvent,
-    uberWindow: UberWindowSignal?,
-    bitmap: Bitmap
-  ) {
+  private fun processBitmap(event: AccessibilityEvent, uberWindow: UberWindowSignal?, bitmap: Bitmap) {
     val width = bitmap.width
     val height = bitmap.height
     val image = InputImage.fromBitmap(bitmap, 0)
@@ -296,12 +289,14 @@ class RideAccessibilityService : AccessibilityService() {
     recognizer.process(image)
       .addOnSuccessListener { result ->
         try {
-          val offerCard = extractCurrentOfferCard(result)
-          if (offerCard == null) {
+          val card = extractCurrentOfferCard(result)
+          if (card == null) {
             persistStatus(event, uberWindow, "OCR_PROBE: NO_CURRENT_OFFER_CARD")
           } else {
-            extractDecisionOverlayData(offerCard)?.let { showDecisionOverlay(it) }
-            persistOcrResult(event, uberWindow, offerCard, width, height)
+            val extraction = extractDecisionOverlayData(card)
+            if (extraction.data != null) showDecisionOverlay(extraction.data)
+            else persistStatus(event, uberWindow, "OCR_PROBE: DECISION_REJECTED ${extraction.reason}")
+            persistOcrResult(event, uberWindow, card, width, height)
           }
         } catch (_: Exception) {
           persistStatus(event, uberWindow, "OCR_PROBE: RESULT_PROCESSING_ERROR")
@@ -311,25 +306,14 @@ class RideAccessibilityService : AccessibilityService() {
         }
       }
       .addOnFailureListener { error ->
-        try {
-          persistStatus(event, uberWindow, "OCR_PROBE: OCR_ERROR ${error.javaClass.simpleName}")
-        } finally {
+        try { persistStatus(event, uberWindow, "OCR_PROBE: OCR_ERROR ${error.javaClass.simpleName}") }
+        finally {
           try { bitmap.recycle() } catch (_: Exception) {}
           captureInFlight.set(false)
         }
       }
   }
 
-  /**
-   * Isolate exactly one visible Uber card.
-   *
-   * 1) Anchor the bottom of the card by Aceitar/Selecionar.
-   * 2) Find the MAIN fare above it (largest eligible fare text).
-   * 3) Keep only lines spatially between that fare and action button.
-   *
-   * This is the key fix for the previous feedback-loop bug where OCR read the
-   * MotoristaPro overlay and/or old screenshots behind the Uber bubble.
-   */
   private fun extractCurrentOfferCard(result: Text): OfferCard? {
     val allLines = mutableListOf<OcrLineRecord>()
     for (block in result.textBlocks) {
@@ -360,75 +344,138 @@ class RideAccessibilityService : AccessibilityService() {
     }
     if (eligibleFares.isEmpty()) return null
 
-    // Main ride fare is visually the largest currency line on the offer card.
     val mainFare = eligibleFares.maxWithOrNull(
       compareBy<OcrLineRecord> { it.bounds.height() }
         .thenBy { it.bounds.width() }
         .thenBy { centerY(it.bounds) }
     ) ?: return null
 
-    // The action button belongs to the same card only when it is below the fare.
     if (actionLine.bounds.top <= mainFare.bounds.bottom) return null
 
-    val cardTop = (mainFare.bounds.top - dp(110)).coerceAtLeast(0)
+    val horizontalPad = dp(50)
+    val actionCenterX = actionLine.bounds.left + actionLine.bounds.width() / 2
+    val cardLeft = (actionCenterX - resources.displayMetrics.widthPixels * 0.50).toInt().coerceAtLeast(0)
+    val cardRight = (actionCenterX + resources.displayMetrics.widthPixels * 0.50).toInt()
+      .coerceAtMost(resources.displayMetrics.widthPixels)
+    val cardTop = (mainFare.bounds.top - dp(130)).coerceAtLeast(0)
     val cardBottom = actionLine.bounds.bottom + dp(20)
+
     val cardLines = allLines
-      .filter { centerY(it.bounds) in cardTop..cardBottom }
+      .filter {
+        val cy = centerY(it.bounds)
+        val cx = it.bounds.left + it.bounds.width() / 2
+        cy in cardTop..cardBottom && cx in (cardLeft - horizontalPad)..(cardRight + horizontalPad)
+      }
       .sortedWith(compareBy<OcrLineRecord> { it.bounds.top }.thenBy { it.bounds.left })
 
     return OfferCard(cardLines, mainFare, actionLine)
   }
 
-  private fun extractDecisionOverlayData(card: OfferCard): DecisionOverlayData? {
+  private fun parseDurationMinutes(text: String): Int? {
+    val hourMatch = HOUR_MINUTE_REGEX.find(text)
+    if (hourMatch != null) {
+      val hours = hourMatch.groupValues.getOrNull(1)?.toIntOrNull() ?: return null
+      val mins = hourMatch.groupValues.getOrNull(2)?.toIntOrNull() ?: 0
+      val total = hours * 60 + mins
+      return total.takeIf { it in 1..360 }
+    }
+
+    return MINUTE_REGEX.find(text)
+      ?.groupValues?.getOrNull(1)
+      ?.toIntOrNull()
+      ?.takeIf { it in 1..360 }
+  }
+
+  private fun extractRouteLegs(card: OfferCard): List<RouteLeg> {
+    val routeLines = card.lines.filter { line ->
+      line.bounds.top > card.mainFareLine.bounds.bottom &&
+        line.bounds.bottom < card.actionLine.bounds.top &&
+        !normalize(line.text).contains("/km") &&
+        !normalize(line.text).contains("aprox")
+    }
+
+    val direct = LinkedHashMap<String, RouteLeg>()
+    routeLines.forEach { line ->
+      val minutes = parseDurationMinutes(line.text)
+      val distance = DISTANCE_REGEX.find(line.text)?.groupValues?.getOrNull(1)?.let(::parseDecimal)
+      if (minutes != null && distance != null && distance > 0.0 && distance <= 150.0) {
+        val key = "$minutes|${String.format(Locale.US, "%.2f", distance)}"
+        direct.putIfAbsent(key, RouteLeg(minutes, distance, line.bounds.top))
+      }
+    }
+
+    if (direct.size in 2..3) return direct.values.sortedBy { it.top }
+
+    // ML Kit sometimes splits duration and distance into adjacent OCR lines.
+    // Pair only nearby rows inside the isolated Uber card.
+    val timeLines = routeLines.mapNotNull { line ->
+      parseDurationMinutes(line.text)?.let { it to line }
+    }
+    val distanceLines = routeLines.mapNotNull { line ->
+      DISTANCE_REGEX.find(line.text)?.groupValues?.getOrNull(1)?.let(::parseDecimal)?.let { km -> km to line }
+    }
+
+    val usedDistance = HashSet<Int>()
+    val paired = LinkedHashMap<String, RouteLeg>()
+    for ((minutes, timeLine) in timeLines) {
+      var bestIndex = -1
+      var bestScore = Int.MAX_VALUE
+      distanceLines.forEachIndexed { index, (_, distLine) ->
+        if (usedDistance.contains(index)) return@forEachIndexed
+        val dy = abs(centerY(timeLine.bounds) - centerY(distLine.bounds))
+        val score = dy
+        if (score < bestScore) {
+          bestScore = score
+          bestIndex = index
+        }
+      }
+      if (bestIndex >= 0 && bestScore <= dp(48)) {
+        usedDistance.add(bestIndex)
+        val km = distanceLines[bestIndex].first
+        if (km > 0.0 && km <= 150.0) {
+          val key = "$minutes|${String.format(Locale.US, "%.2f", km)}"
+          paired.putIfAbsent(key, RouteLeg(minutes, km, minOf(timeLine.bounds.top, distanceLines[bestIndex].second.bounds.top)))
+        }
+      }
+    }
+
+    return paired.values.sortedBy { it.top }
+  }
+
+  private fun extractDecisionOverlayData(card: OfferCard): DecisionExtraction {
     val fare = FARE_REGEX.find(card.mainFareLine.text)
       ?.groupValues?.getOrNull(1)
       ?.let(::parseDecimal)
       ?.takeIf { it > 0.0 }
-      ?: return null
+      ?: return DecisionExtraction(null, "fare")
 
-    val uniqueLegs = LinkedHashMap<String, RouteLeg>()
-    for (line in card.lines) {
-      // Only route rows BETWEEN main fare and action button may participate.
-      if (line.bounds.top <= card.mainFareLine.bounds.bottom) continue
-      if (line.bounds.bottom >= card.actionLine.bounds.top) continue
-
-      val normalized = normalize(line.text)
-      if (normalized.contains("/km") || normalized.contains("aprox")) continue
-
-      val time = TIME_REGEX.find(line.text)?.groupValues?.getOrNull(1)?.toIntOrNull()
-      val distance = DISTANCE_REGEX.find(line.text)?.groupValues?.getOrNull(1)?.let(::parseDecimal)
-      if (
-        time != null && time in 1..180 &&
-        distance != null && distance > 0.0 && distance <= 150.0
-      ) {
-        val key = "${time}|${String.format(Locale.US, "%.2f", distance)}"
-        uniqueLegs.putIfAbsent(key, RouteLeg(time, distance, line.bounds.top))
-      }
+    val routeLegs = extractRouteLegs(card)
+    if (routeLegs.size !in 2..3) {
+      return DecisionExtraction(null, "legs=${routeLegs.size}")
     }
-
-    val routeLegs = uniqueLegs.values.sortedBy { it.top }
-
-    // Normal ride = pickup + trip. One intermediate stop = 3 legs.
-    // More than 3 means the frame is contaminated; reject instead of guessing.
-    if (routeLegs.size !in 2..3) return null
 
     val totalMinutes = routeLegs.sumOf { it.minutes }
     val totalKm = routeLegs.sumOf { it.km }
-    if (totalMinutes !in 2..240 || totalKm <= 0.0 || totalKm > 200.0) return null
+    if (totalMinutes !in 2..360 || totalKm <= 0.0 || totalKm > 200.0) {
+      return DecisionExtraction(null, "totals=${totalMinutes}min/${format1(totalKm)}km")
+    }
 
     val reaisPerKm = fare / totalKm
     val reaisPerHour = fare / (totalMinutes / 60.0)
 
-    // Uber itself prints an approximate R$/km on this same card. Use that as a
-    // strong consistency check. If our summed legs disagree, reject the frame.
     val uberApproxPerKm = card.lines.asSequence()
       .filter { normalize(it.text).contains("/km") }
       .mapNotNull { APPROX_PER_KM_REGEX.find(it.text)?.groupValues?.getOrNull(1)?.let(::parseDecimal) }
       .firstOrNull { it > 0.0 }
 
     if (uberApproxPerKm != null) {
-      val tolerance = max(0.15, uberApproxPerKm * 0.12)
-      if (abs(reaisPerKm - uberApproxPerKm) > tolerance) return null
+      val tolerance = max(0.18, uberApproxPerKm * 0.14)
+      if (abs(reaisPerKm - uberApproxPerKm) > tolerance) {
+        return DecisionExtraction(
+          null,
+          "rate expected=${format2(uberApproxPerKm)} actual=${format2(reaisPerKm)}"
+        )
+      }
     }
 
     val semaphore = when {
@@ -447,27 +494,19 @@ class RideAccessibilityService : AccessibilityService() {
       hasStops.toString()
     ).joinToString("|")
 
-    return DecisionOverlayData(
-      fare = fare,
-      totalKm = totalKm,
-      totalMinutes = totalMinutes,
-      reaisPerKm = reaisPerKm,
-      reaisPerHour = reaisPerHour,
-      semaphore = semaphore,
-      hasStops = hasStops,
-      signature = signature
+    return DecisionExtraction(
+      DecisionOverlayData(
+        fare = fare,
+        totalKm = totalKm,
+        totalMinutes = totalMinutes,
+        reaisPerKm = reaisPerKm,
+        reaisPerHour = reaisPerHour,
+        semaphore = semaphore,
+        hasStops = hasStops,
+        signature = signature
+      ),
+      "ok"
     )
-  }
-
-  private fun centerY(rect: Rect): Int = rect.top + (rect.height() / 2)
-
-  private fun parseDecimal(value: String): Double? {
-    val cleaned = value.trim().replace(" ", "")
-    if (cleaned.isBlank()) return null
-    return when {
-      cleaned.contains(',') -> cleaned.replace(".", "").replace(',', '.').toDoubleOrNull()
-      else -> cleaned.toDoubleOrNull()
-    }
   }
 
   private fun showDecisionOverlay(data: DecisionOverlayData) {
@@ -478,7 +517,6 @@ class RideAccessibilityService : AccessibilityService() {
 
     overlayHandler.post {
       hideDecisionOverlay()
-
       val windowManager = getSystemService(WINDOW_SERVICE) as WindowManager
       val borderColor = when (data.semaphore) {
         "green" -> Color.rgb(28, 185, 84)
@@ -576,21 +614,9 @@ class RideAccessibilityService : AccessibilityService() {
     try {
       val windowManager = getSystemService(WINDOW_SERVICE) as WindowManager
       windowManager.removeView(current)
-    } catch (_: Exception) {
-    }
+    } catch (_: Exception) {}
   }
 
-  private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()
-
-  private fun format1(value: Double): String {
-    return String.format(Locale.US, "%.1f", value).replace('.', ',')
-  }
-
-  private fun format2(value: Double): String {
-    return String.format(Locale.US, "%.2f", value).replace('.', ',')
-  }
-
-  /** Persist only the isolated current card, never the whole screenshot. */
   private fun persistOcrResult(
     event: AccessibilityEvent,
     uberWindow: UberWindowSignal?,
@@ -651,11 +677,7 @@ class RideAccessibilityService : AccessibilityService() {
     try { RideAccessibilityStore.append(applicationContext, snapshot) } catch (_: Exception) {}
   }
 
-  private fun persistStatus(
-    event: AccessibilityEvent,
-    uberWindow: UberWindowSignal?,
-    detail: String
-  ) {
+  private fun persistStatus(event: AccessibilityEvent, uberWindow: UberWindowSignal?, detail: String) {
     val now = System.currentTimeMillis()
     val safeMeta = buildString {
       append(detail)
@@ -697,6 +719,17 @@ class RideAccessibilityService : AccessibilityService() {
     try { RideAccessibilityStore.append(applicationContext, snapshot) } catch (_: Exception) {}
   }
 
+  private fun centerY(rect: Rect): Int = rect.top + (rect.height() / 2)
+
+  private fun parseDecimal(value: String): Double? {
+    val cleaned = value.trim().replace(" ", "")
+    if (cleaned.isBlank()) return null
+    return when {
+      cleaned.contains(',') -> cleaned.replace(".", "").replace(',', '.').toDoubleOrNull()
+      else -> cleaned.toDoubleOrNull()
+    }
+  }
+
   private fun rectToJson(rect: Rect): JSONObject {
     return JSONObject().apply {
       put("left", rect.left)
@@ -723,6 +756,16 @@ class RideAccessibilityService : AccessibilityService() {
   private fun normalize(value: String): String {
     return value.lowercase().replace(Regex("""\s+"""), " ").trim()
   }
+
+  private fun format1(value: Double): String {
+    return String.format(Locale.US, "%.1f", value).replace('.', ',')
+  }
+
+  private fun format2(value: Double): String {
+    return String.format(Locale.US, "%.2f", value).replace('.', ',')
+  }
+
+  private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()
 
   private fun mapError(code: Int): String {
     if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return "UNSUPPORTED_API"
