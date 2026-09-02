@@ -1,4 +1,3 @@
-import { describe, expect, it } from "vitest";
 import { calculateOfferEconomics, classifyOffer, dedupeOffers } from "@/services/RideOfferDecision";
 import type { NormalizedRideOffer } from "@/services/RideOfferNormalizer";
 
@@ -30,7 +29,7 @@ describe("RideOfferDecision", () => {
     expect(metrics.reaisPerHour).toBeCloseTo(52, 2);
   });
 
-  it("classifies green/yellow/red only when configurable thresholds exist", () => {
+  it("classifies green/yellow/red using configurable thresholds and defaults", () => {
     const thresholds = {
       greenPerKm: 2.0,
       yellowPerKm: 1.5,
@@ -41,7 +40,7 @@ describe("RideOfferDecision", () => {
     expect(classifyOffer(offer(), thresholds)).toBe("green");
     expect(classifyOffer(offer({ offeredAmountCents: 500 }), thresholds)).toBe("yellow");
     expect(classifyOffer(offer({ offeredAmountCents: 300 }), thresholds)).toBe("red");
-    expect(classifyOffer(offer(), null)).toBe("neutral");
+    expect(classifyOffer(offer(), null)).toBe("green");
   });
 
   it("collapses repeated OCR/accessibility readings of the same offer within 30s", () => {
