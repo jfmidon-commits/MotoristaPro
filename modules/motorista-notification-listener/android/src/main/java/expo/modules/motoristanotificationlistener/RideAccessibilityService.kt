@@ -90,6 +90,11 @@ class RideAccessibilityService : AccessibilityService() {
     val active: Boolean
   )
 
+  private data class RouteLeg(
+    val minutes: Int,
+    val km: Double
+  )
+
   private data class DecisionOverlayData(
     val fare: Double,
     val totalKm: Double,
@@ -310,9 +315,9 @@ class RideAccessibilityService : AccessibilityService() {
 
   /**
    * Build decision data only from a COMPLETE Uber card.
-   * We require at least two time-distance route legs so a partial OCR frame cannot
-   * be mistaken for the total. The normal card has pickup + passenger trip; cards
-   * with an intermediate stop may expose more legs and all legs are summed.
+   * Route legs are deduplicated because ML Kit can occasionally report the same
+   * visual line more than once in a frame. The normal card has pickup + trip;
+   * cards with an intermediate stop may expose a third unique route leg.
    */
   private fun extractDecisionOverlayData(result: Text): DecisionOverlayData? {
     val lines = mutableListOf<String>()
@@ -336,8 +341,7 @@ class RideAccessibilityService : AccessibilityService() {
       .firstOrNull { it > 0.0 }
       ?: return null
 
-    val routeTimes = mutableListOf<Int>()
-    val routeDistances = mutableListOf<Double>()
+    val uniqueLegs = LinkedHashMap<String, RouteLeg>()
 
     for (line in lines) {
       val normalized = normalize(line)
@@ -345,17 +349,22 @@ class RideAccessibilityService : AccessibilityService() {
 
       val time = TIME_REGEX.find(line)?.groupValues?.getOrNull(1)?.toIntOrNull()
       val distance = DISTANCE_REGEX.find(line)?.groupValues?.getOrNull(1)?.let(::parseDecimal)
-      if (time != null && time > 0 && distance != null && distance > 0.0) {
-        routeTimes.add(time)
-        routeDistances.add(distance)
+      if (
+        time != null && time in 1..240 &&
+        distance != null && distance > 0.0 && distance <= 300.0
+      ) {
+        val key = "${time}|${String.format(Locale.US, "%.2f", distance)}"
+        uniqueLegs.putIfAbsent(key, RouteLeg(time, distance))
       }
     }
 
-    // Safety first: do not show a decision from an incomplete frame.
-    if (routeTimes.size < 2 || routeDistances.size < 2) return null
+    val routeLegs = uniqueLegs.values.toList()
 
-    val totalMinutes = routeTimes.sum()
-    val totalKm = routeDistances.sum()
+    // Safety first: never turn a partial single-leg OCR frame into a total.
+    if (routeLegs.size < 2) return null
+
+    val totalMinutes = routeLegs.sumOf { it.minutes }
+    val totalKm = routeLegs.sumOf { it.km }
     if (totalMinutes <= 0 || totalKm <= 0.0) return null
 
     val reaisPerKm = fare / totalKm
@@ -366,9 +375,10 @@ class RideAccessibilityService : AccessibilityService() {
       else -> "yellow"
     }
 
-    val hasStops = routeDistances.size > 2 || lines.any {
+    val explicitStop = lines.any {
       Regex("""\bparada(?:s)?\b""", RegexOption.IGNORE_CASE).containsMatchIn(it)
     }
+    val hasStops = routeLegs.size > 2 || explicitStop
 
     val signature = listOf(
       (fare * 100).toInt().toString(),
@@ -389,8 +399,19 @@ class RideAccessibilityService : AccessibilityService() {
     )
   }
 
+  /**
+   * Uber/ML Kit can return Brazilian decimals with comma or OCR-normalized values
+   * with a dot. A dot is therefore a decimal separator unless a comma is also
+   * present (when dots are treated as thousands separators).
+   */
   private fun parseDecimal(value: String): Double? {
-    return value.replace(".", "").replace(',', '.').toDoubleOrNull()
+    val cleaned = value.trim().replace(" ", "")
+    if (cleaned.isBlank()) return null
+
+    return when {
+      cleaned.contains(',') -> cleaned.replace(".", "").replace(',', '.').toDoubleOrNull()
+      else -> cleaned.toDoubleOrNull()
+    }
   }
 
   private fun showDecisionOverlay(data: DecisionOverlayData) {
