@@ -47,15 +47,28 @@ export interface AccessibilitySnapshot {
   origins?: string[];
 }
 
+export type RideLifecycleNativeState = "offer" | "in_progress" | "ended" | "payment_confirmed" | "stale_reset";
+export type RideLifecycleNativePaymentMethod = "cash" | "pix" | "app";
+
+export interface RideLifecycleNativeEvent {
+  platform: "uber" | "99";
+  state: RideLifecycleNativeState;
+  detectedAt: number;
+  paymentMethod?: RideLifecycleNativePaymentMethod | null;
+}
+
 type NativeModuleShape = {
   getPermissionStatus(): NativeNotificationPermissionStatus;
   openNotificationAccessSettings(): boolean;
   getPendingNotificationsJson(): string;
   clearPendingNotifications(): boolean;
   getAccessibilityPermissionStatus(): NativeNotificationPermissionStatus;
+  getRideLifecyclePermissionStatus(): NativeNotificationPermissionStatus;
   openAccessibilitySettings(): boolean;
   getPendingAccessibilitySnapshotsJson(): string;
   clearPendingAccessibilitySnapshots(): boolean;
+  getPendingRideLifecycleEventsJson(): string;
+  clearPendingRideLifecycleEvents(): boolean;
 };
 
 const NativeModule = requireOptionalNativeModule<NativeModuleShape>("MotoristaNotificationListener");
@@ -86,6 +99,10 @@ export function getAccessibilityAccessStatus(): NativeNotificationPermissionStat
   return NativeModule?.getAccessibilityPermissionStatus() ?? "unavailable";
 }
 
+export function getRideLifecycleAccessStatus(): NativeNotificationPermissionStatus {
+  return NativeModule?.getRideLifecyclePermissionStatus() ?? "unavailable";
+}
+
 export function openAccessibilitySettings(): boolean {
   return NativeModule?.openAccessibilitySettings() ?? false;
 }
@@ -102,4 +119,18 @@ export function getPendingAccessibilitySnapshots(): AccessibilitySnapshot[] {
 
 export function clearPendingAccessibilitySnapshots(): boolean {
   return NativeModule?.clearPendingAccessibilitySnapshots() ?? false;
+}
+
+export function getPendingRideLifecycleEvents(): RideLifecycleNativeEvent[] {
+  if (!NativeModule) return [];
+  try {
+    const parsed = JSON.parse(NativeModule.getPendingRideLifecycleEventsJson());
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+export function clearPendingRideLifecycleEvents(): boolean {
+  return NativeModule?.clearPendingRideLifecycleEvents() ?? false;
 }
