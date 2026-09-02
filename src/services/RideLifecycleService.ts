@@ -1,9 +1,15 @@
 import { getRideOfferById } from "@/services/RideOfferService";
 import { addRideResult, getRideResultByOfferId } from "@/services/RideResultService";
 import { addTransaction } from "@/services/TransactionService";
+import {
+  incomeCategoryForPlatform,
+  paymentMethodLabel,
+  type RidePaymentMethod
+} from "@/services/RideLifecycleLabels";
 
 export type RideLifecycleState = "offer" | "accepted" | "in_progress" | "ended" | "confirmed";
-export type RidePaymentMethod = "cash" | "pix" | "app";
+export type { RidePaymentMethod } from "@/services/RideLifecycleLabels";
+export { incomeCategoryForPlatform, paymentMethodLabel } from "@/services/RideLifecycleLabels";
 
 export interface CompleteRideParams {
   userId: string;
@@ -20,22 +26,6 @@ export interface CompleteRideResult {
   rideResultId: string;
   transactionId: string | null;
   alreadyCompleted: boolean;
-}
-
-export function paymentMethodLabel(method: RidePaymentMethod): string {
-  switch (method) {
-    case "cash": return "Dinheiro";
-    case "pix": return "Pix";
-    case "app": return "Aplicativo";
-  }
-}
-
-export function incomeCategoryForPlatform(platform: string): string {
-  const normalized = platform.trim().toLowerCase();
-  if (normalized === "uber") return "Corrida Uber";
-  if (normalized === "99") return "Corrida 99";
-  if (normalized === "indrive") return "Corrida inDrive";
-  return "Corrida aplicativo";
 }
 
 /**
