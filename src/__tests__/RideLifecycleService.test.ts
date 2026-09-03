@@ -13,4 +13,9 @@ describe("RideLifecycleService helpers", () => {
     expect(incomeCategoryForPlatform("indrive")).toBe("Corrida inDrive");
     expect(incomeCategoryForPlatform("other")).toBe("Corrida aplicativo");
   });
+
+  test("normalizes platform casing and whitespace before booking income", () => {
+    expect(incomeCategoryForPlatform(" UBER ")).toBe("Corrida Uber");
+    expect(incomeCategoryForPlatform("InDrive")).toBe("Corrida inDrive");
+  });
 });
