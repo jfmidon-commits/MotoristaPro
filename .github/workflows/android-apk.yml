@@ -30,6 +30,7 @@ jobs:
   build-apk:
     # Experimental branch is allowed on push so we spend exactly one build for the screenshot probe.
     # Triggered after CI/native checks pass so the resulting artifact is suitable for device validation.
+    # Build marker: ride lifecycle/payment flow validated by CI/native checks before device test.
     if: github.event_name != 'pull_request' || (github.head_ref != 'feature/ride-accessibility-capture' && github.head_ref != 'experiment/ride-accessibility-screenshot-ocr')
     runs-on: ubuntu-latest
     timeout-minutes: 45
