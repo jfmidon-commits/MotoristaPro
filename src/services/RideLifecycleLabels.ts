@@ -1,5 +1,7 @@
 export type RidePaymentMethod = "cash" | "pix" | "app";
 
+// Keep lifecycle labels dependency-free: native ride detection and financial booking
+// can share these mappings without pulling SQLite/UUID/native modules into unit tests.
 export function paymentMethodLabel(method: RidePaymentMethod): string {
   switch (method) {
     case "cash": return "Dinheiro";
