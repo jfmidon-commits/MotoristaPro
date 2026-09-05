@@ -38,17 +38,19 @@ import kotlin.math.max
  * - the largest eligible R$ line is the fare;
  * - route legs are read only between fare and action button;
  * - hour durations such as "1 h e 4 min" are converted to 64 minutes;
- * - mixed/contaminated frames are rejected instead of guessed.
+ * - mixed/contaminated frames are rejected instead of guessed;
+ * - a short controlled retry chain handles Uber cards that render just after the accessibility event.
  */
 class RideAccessibilityService : AccessibilityService() {
   companion object {
     private const val UBER_PACKAGE = "com.ubercab.driver"
-    private const val MIN_CAPTURE_INTERVAL_MS = 500L
+    private const val MIN_CAPTURE_INTERVAL_MS = 550L
     private const val MAX_OCR_LINES = 64
     private const val MAX_LINE_CHARS = 220
     private const val OVERLAY_STALE_MS = 2_500L
     private const val OVERLAY_DEDUPE_MS = 20_000L
-    private const val NO_OFFER_FRAMES_TO_HIDE = 2
+    private const val NO_OFFER_SEQUENCES_TO_HIDE = 2
+    private val RETRY_DELAYS_MS = longArrayOf(650L, 900L, 1_250L)
 
     private const val GREEN_PER_KM = 2.10
     private const val YELLOW_PER_KM = 1.70
@@ -114,6 +116,13 @@ class RideAccessibilityService : AccessibilityService() {
     val active: Boolean
   )
 
+  private data class CaptureTrigger(
+    val eventType: Int,
+    val windowId: Int,
+    val attempt: Int,
+    val chainId: Long
+  )
+
   private data class OcrLineRecord(val text: String, val bounds: Rect)
 
   private data class OfferCard(
@@ -143,11 +152,14 @@ class RideAccessibilityService : AccessibilityService() {
   private val lastCaptureAt = AtomicLong(0L)
   private val captureInFlight = AtomicBoolean(false)
   private val overlayHandler = Handler(Looper.getMainLooper())
+  private val retryHandler = Handler(Looper.getMainLooper())
+  private var retryRunnable: Runnable? = null
+  private var retryGeneration = 0L
   private var overlayView: View? = null
   private var overlayHideRunnable: Runnable? = null
   private var lastOverlaySignature: String? = null
   private var lastOverlayAt: Long = 0L
-  private var consecutiveNoOfferFrames = 0
+  private var consecutiveNoOfferSequences = 0
 
   private val recognizer by lazy {
     TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
@@ -156,27 +168,23 @@ class RideAccessibilityService : AccessibilityService() {
   override fun onAccessibilityEvent(event: AccessibilityEvent?) {
     if (event == null || !isRelevantEventType(event.eventType)) return
 
-    val uberWindow = findBestUberWindow()
-    if (!isOfferSizedUberWindow(uberWindow)) return
-
-    val now = System.currentTimeMillis()
-    val previous = lastCaptureAt.get()
-    if (now - previous < MIN_CAPTURE_INTERVAL_MS) return
-    if (!lastCaptureAt.compareAndSet(previous, now)) return
-    if (!captureInFlight.compareAndSet(false, true)) return
-
-    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
-      persistStatus(event, uberWindow, "OCR_PROBE: UNSUPPORTED_API")
-      captureInFlight.set(false)
-      return
-    }
-
-    takeDisplayScreenshot(event, uberWindow)
+    val chainId = beginRetryChain()
+    attemptCapture(
+      CaptureTrigger(
+        eventType = event.eventType,
+        windowId = event.windowId,
+        attempt = 0,
+        chainId = chainId
+      )
+    )
   }
 
-  override fun onInterrupt() {}
+  override fun onInterrupt() {
+    cancelRetryChain()
+  }
 
   override fun onDestroy() {
+    cancelRetryChain()
     hideDecisionOverlay()
     try { recognizer.close() } catch (_: Exception) {}
     super.onDestroy()
@@ -187,6 +195,73 @@ class RideAccessibilityService : AccessibilityService() {
       eventType == AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED ||
       eventType == AccessibilityEvent.TYPE_WINDOWS_CHANGED ||
       eventType == AccessibilityEvent.TYPE_VIEW_SCROLLED
+  }
+
+  private fun beginRetryChain(): Long {
+    retryRunnable?.let { retryHandler.removeCallbacks(it) }
+    retryRunnable = null
+    retryGeneration += 1L
+    return retryGeneration
+  }
+
+  private fun cancelRetryChain() {
+    retryRunnable?.let { retryHandler.removeCallbacks(it) }
+    retryRunnable = null
+    retryGeneration += 1L
+  }
+
+  private fun scheduleRetry(trigger: CaptureTrigger, delayMs: Long? = null) {
+    if (trigger.chainId != retryGeneration) return
+    if (trigger.attempt >= RETRY_DELAYS_MS.size) return
+
+    retryRunnable?.let { retryHandler.removeCallbacks(it) }
+    val nextAttempt = trigger.attempt + 1
+    val delay = delayMs ?: RETRY_DELAYS_MS[trigger.attempt]
+    val runnable = Runnable {
+      if (trigger.chainId != retryGeneration) return@Runnable
+      retryRunnable = null
+      attemptCapture(trigger.copy(attempt = nextAttempt))
+    }
+    retryRunnable = runnable
+    retryHandler.postDelayed(runnable, delay.coerceAtLeast(120L))
+  }
+
+  private fun attemptCapture(trigger: CaptureTrigger) {
+    if (trigger.chainId != retryGeneration) return
+
+    val uberWindow = findBestUberWindow()
+    if (!isOfferSizedUberWindow(uberWindow)) {
+      if (trigger.attempt < RETRY_DELAYS_MS.size) {
+        scheduleRetry(trigger)
+      } else {
+        confirmNoOfferSequence(trigger, uberWindow, "WINDOW_NOT_READY")
+      }
+      return
+    }
+
+    val now = System.currentTimeMillis()
+    val previous = lastCaptureAt.get()
+    val elapsed = now - previous
+    if (elapsed < MIN_CAPTURE_INTERVAL_MS) {
+      val remaining = (MIN_CAPTURE_INTERVAL_MS - elapsed + 75L).coerceAtLeast(120L)
+      scheduleRetry(trigger.copy(attempt = trigger.attempt.coerceAtMost(RETRY_DELAYS_MS.size - 1)), remaining)
+      return
+    }
+
+    if (!captureInFlight.compareAndSet(false, true)) {
+      scheduleRetry(trigger.copy(attempt = trigger.attempt.coerceAtMost(RETRY_DELAYS_MS.size - 1)), 300L)
+      return
+    }
+
+    lastCaptureAt.set(now)
+
+    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
+      persistStatus(trigger, uberWindow, "OCR_PROBE: UNSUPPORTED_API")
+      captureInFlight.set(false)
+      return
+    }
+
+    takeDisplayScreenshot(trigger, uberWindow)
   }
 
   private fun findBestUberWindow(): UberWindowSignal? {
@@ -234,7 +309,7 @@ class RideAccessibilityService : AccessibilityService() {
       heightRatio >= MIN_UBER_WINDOW_HEIGHT_RATIO
   }
 
-  private fun takeDisplayScreenshot(event: AccessibilityEvent, uberWindow: UberWindowSignal?) {
+  private fun takeDisplayScreenshot(trigger: CaptureTrigger, uberWindow: UberWindowSignal?) {
     try {
       takeScreenshot(
         Display.DEFAULT_DISPLAY,
@@ -247,21 +322,24 @@ class RideAccessibilityService : AccessibilityService() {
             try {
               hardwareBitmap = Bitmap.wrapHardwareBuffer(buffer, screenshot.colorSpace)
               if (hardwareBitmap == null) {
-                persistStatus(event, uberWindow, "OCR_PROBE: BITMAP_WRAP_FAILED")
+                persistStatus(trigger, uberWindow, "OCR_PROBE: BITMAP_WRAP_FAILED")
                 captureInFlight.set(false)
+                scheduleRetry(trigger)
                 return
               }
               softwareBitmap = hardwareBitmap.copy(Bitmap.Config.ARGB_8888, false)
               if (softwareBitmap == null) {
-                persistStatus(event, uberWindow, "OCR_PROBE: BITMAP_COPY_FAILED")
+                persistStatus(trigger, uberWindow, "OCR_PROBE: BITMAP_COPY_FAILED")
                 captureInFlight.set(false)
+                scheduleRetry(trigger)
                 return
               }
-              processBitmap(event, uberWindow, softwareBitmap)
+              processBitmap(trigger, uberWindow, softwareBitmap)
             } catch (_: Exception) {
               try { softwareBitmap?.recycle() } catch (_: Exception) {}
-              persistStatus(event, uberWindow, "OCR_PROBE: BITMAP_ERROR")
+              persistStatus(trigger, uberWindow, "OCR_PROBE: BITMAP_ERROR")
               captureInFlight.set(false)
+              scheduleRetry(trigger)
             } finally {
               try { hardwareBitmap?.recycle() } catch (_: Exception) {}
               try { buffer.close() } catch (_: Exception) {}
@@ -269,21 +347,27 @@ class RideAccessibilityService : AccessibilityService() {
           }
 
           override fun onFailure(errorCode: Int) {
-            try { persistStatus(event, uberWindow, "OCR_PROBE: ${mapError(errorCode)} code=$errorCode") }
-            finally { captureInFlight.set(false) }
+            try {
+              persistStatus(trigger, uberWindow, "OCR_PROBE: ${mapError(errorCode)} code=$errorCode")
+            } finally {
+              captureInFlight.set(false)
+              val delay = if (errorCode == ERROR_TAKE_SCREENSHOT_INTERVAL_TIME_SHORT) MIN_CAPTURE_INTERVAL_MS + 100L else null
+              scheduleRetry(trigger, delay)
+            }
           }
         }
       )
     } catch (_: SecurityException) {
-      persistStatus(event, uberWindow, "OCR_PROBE: SECURITY_EXCEPTION")
+      persistStatus(trigger, uberWindow, "OCR_PROBE: SECURITY_EXCEPTION")
       captureInFlight.set(false)
     } catch (_: Exception) {
-      persistStatus(event, uberWindow, "OCR_PROBE: INTERNAL_EXCEPTION")
+      persistStatus(trigger, uberWindow, "OCR_PROBE: INTERNAL_EXCEPTION")
       captureInFlight.set(false)
+      scheduleRetry(trigger)
     }
   }
 
-  private fun processBitmap(event: AccessibilityEvent, uberWindow: UberWindowSignal?, bitmap: Bitmap) {
+  private fun processBitmap(trigger: CaptureTrigger, uberWindow: UberWindowSignal?, bitmap: Bitmap) {
     val width = bitmap.width
     val height = bitmap.height
     val image = InputImage.fromBitmap(bitmap, 0)
@@ -293,40 +377,56 @@ class RideAccessibilityService : AccessibilityService() {
         try {
           val card = extractCurrentOfferCard(result)
           if (card == null) {
-            handleNoCurrentOffer(event, uberWindow)
+            handleNoCurrentOffer(trigger, uberWindow)
           } else {
-            consecutiveNoOfferFrames = 0
+            consecutiveNoOfferSequences = 0
+            cancelRetryChain()
             val extraction = extractDecisionOverlayData(card)
             if (extraction.data != null) showDecisionOverlay(extraction.data)
-            else persistStatus(event, uberWindow, "OCR_PROBE: DECISION_REJECTED ${extraction.reason}")
-            persistOcrResult(event, uberWindow, card, width, height)
+            else persistStatus(trigger, uberWindow, "OCR_PROBE: DECISION_REJECTED ${extraction.reason}")
+            persistOcrResult(trigger, uberWindow, card, width, height)
           }
         } catch (_: Exception) {
-          persistStatus(event, uberWindow, "OCR_PROBE: RESULT_PROCESSING_ERROR")
+          persistStatus(trigger, uberWindow, "OCR_PROBE: RESULT_PROCESSING_ERROR")
         } finally {
           try { bitmap.recycle() } catch (_: Exception) {}
           captureInFlight.set(false)
         }
       }
       .addOnFailureListener { error ->
-        try { persistStatus(event, uberWindow, "OCR_PROBE: OCR_ERROR ${error.javaClass.simpleName}") }
+        try { persistStatus(trigger, uberWindow, "OCR_PROBE: OCR_ERROR ${error.javaClass.simpleName}") }
         finally {
           try { bitmap.recycle() } catch (_: Exception) {}
           captureInFlight.set(false)
+          scheduleRetry(trigger)
         }
       }
   }
 
-  private fun handleNoCurrentOffer(event: AccessibilityEvent, uberWindow: UberWindowSignal?) {
-    consecutiveNoOfferFrames += 1
-    if (consecutiveNoOfferFrames >= NO_OFFER_FRAMES_TO_HIDE) {
+  private fun handleNoCurrentOffer(trigger: CaptureTrigger, uberWindow: UberWindowSignal?) {
+    if (trigger.attempt < RETRY_DELAYS_MS.size) {
+      persistStatus(
+        trigger,
+        uberWindow,
+        "OCR_PROBE: NO_CURRENT_OFFER_CARD retry=${trigger.attempt + 1}/${RETRY_DELAYS_MS.size}"
+      )
+      scheduleRetry(trigger)
+      return
+    }
+
+    confirmNoOfferSequence(trigger, uberWindow, "NO_CURRENT_OFFER_CARD")
+  }
+
+  private fun confirmNoOfferSequence(trigger: CaptureTrigger, uberWindow: UberWindowSignal?, reason: String) {
+    consecutiveNoOfferSequences += 1
+    if (consecutiveNoOfferSequences >= NO_OFFER_SEQUENCES_TO_HIDE) {
       hideDecisionOverlay()
       lastOverlaySignature = null
       lastOverlayAt = 0L
-      consecutiveNoOfferFrames = 0
-      persistStatus(event, uberWindow, "OCR_PROBE: OFFER_CLEARED")
+      consecutiveNoOfferSequences = 0
+      persistStatus(trigger, uberWindow, "OCR_PROBE: OFFER_CLEARED confirmed=$reason")
     } else {
-      persistStatus(event, uberWindow, "OCR_PROBE: NO_CURRENT_OFFER_CARD")
+      persistStatus(trigger, uberWindow, "OCR_PROBE: NO_CURRENT_OFFER_CARD confirmed=$reason")
     }
   }
 
@@ -422,8 +522,6 @@ class RideAccessibilityService : AccessibilityService() {
 
     if (direct.size in 2..3) return direct.values.sortedBy { it.top }
 
-    // ML Kit sometimes splits duration and distance into adjacent OCR lines.
-    // Pair only nearby rows inside the isolated Uber card.
     val timeLines = routeLines.mapNotNull { line ->
       parseDurationMinutes(line.text)?.let { it to line }
     }
@@ -439,9 +537,8 @@ class RideAccessibilityService : AccessibilityService() {
       distanceLines.forEachIndexed { index, (_, distLine) ->
         if (usedDistance.contains(index)) return@forEachIndexed
         val dy = abs(centerY(timeLine.bounds) - centerY(distLine.bounds))
-        val score = dy
-        if (score < bestScore) {
-          bestScore = score
+        if (dy < bestScore) {
+          bestScore = dy
           bestIndex = index
         }
       }
@@ -450,7 +547,10 @@ class RideAccessibilityService : AccessibilityService() {
         val km = distanceLines[bestIndex].first
         if (km > 0.0 && km <= 150.0) {
           val key = "$minutes|${String.format(Locale.US, "%.2f", km)}"
-          paired.putIfAbsent(key, RouteLeg(minutes, km, minOf(timeLine.bounds.top, distanceLines[bestIndex].second.bounds.top)))
+          paired.putIfAbsent(
+            key,
+            RouteLeg(minutes, km, minOf(timeLine.bounds.top, distanceLines[bestIndex].second.bounds.top))
+          )
         }
       }
     }
@@ -649,7 +749,7 @@ class RideAccessibilityService : AccessibilityService() {
   }
 
   private fun persistOcrResult(
-    event: AccessibilityEvent,
+    trigger: CaptureTrigger,
     uberWindow: UberWindowSignal?,
     card: OfferCard,
     width: Int,
@@ -675,12 +775,12 @@ class RideAccessibilityService : AccessibilityService() {
         put("bottom", line.bounds.bottom)
         put("clickable", ACTION_REGEX.containsMatchIn(raw))
         put("origin", "screenshotOcr")
-        put("windowId", uberWindow?.id ?: event.windowId)
+        put("windowId", uberWindow?.id ?: trigger.windowId)
       })
     }
 
     if (nodes.length() == 0) {
-      persistStatus(event, uberWindow, "OCR_PROBE: CURRENT_CARD_NO_OPERATIONAL_TEXT")
+      persistStatus(trigger, uberWindow, "OCR_PROBE: CURRENT_CARD_NO_OPERATIONAL_TEXT")
       return
     }
 
@@ -691,7 +791,7 @@ class RideAccessibilityService : AccessibilityService() {
 
     val snapshot = JSONObject().apply {
       put("packageName", UBER_PACKAGE)
-      put("eventType", event.eventType)
+      put("eventType", trigger.eventType)
       put("capturedAt", now)
       put("nodeCount", nodes.length())
       put("nodes", nodes)
@@ -702,16 +802,18 @@ class RideAccessibilityService : AccessibilityService() {
       put("targetWindowId", uberWindow?.id ?: JSONObject.NULL)
       put("targetWindowType", uberWindow?.type ?: JSONObject.NULL)
       put("targetWindowBounds", uberWindow?.bounds?.let { rectToJson(it) } ?: JSONObject.NULL)
+      put("captureAttempt", trigger.attempt)
       put("origins", JSONArray().put("screenshotOcr"))
     }
 
     try { RideAccessibilityStore.append(applicationContext, snapshot) } catch (_: Exception) {}
   }
 
-  private fun persistStatus(event: AccessibilityEvent, uberWindow: UberWindowSignal?, detail: String) {
+  private fun persistStatus(trigger: CaptureTrigger, uberWindow: UberWindowSignal?, detail: String) {
     val now = System.currentTimeMillis()
     val safeMeta = buildString {
       append(detail)
+      append(" • attempt=").append(trigger.attempt)
       if (uberWindow != null) {
         append(" • uberWindow=").append(uberWindow.id)
         append(" type=").append(windowTypeName(uberWindow.type))
@@ -733,12 +835,12 @@ class RideAccessibilityService : AccessibilityService() {
       put("bottom", 0)
       put("clickable", false)
       put("origin", "screenshotOcr")
-      put("windowId", uberWindow?.id ?: event.windowId)
+      put("windowId", uberWindow?.id ?: trigger.windowId)
     }
 
     val snapshot = JSONObject().apply {
       put("packageName", UBER_PACKAGE)
-      put("eventType", event.eventType)
+      put("eventType", trigger.eventType)
       put("capturedAt", now)
       put("nodeCount", 1)
       put("nodes", JSONArray().put(node))
