@@ -13,6 +13,7 @@ import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 import android.widget.LinearLayout
 import android.widget.TextView
+import org.json.JSONArray
 import org.json.JSONObject
 import java.util.Locale
 
@@ -20,7 +21,7 @@ import java.util.Locale
  * Conservative ride lifecycle detector for Uber/99.
  *
  * It deliberately requires a strong sequence before prompting for payment:
- * 1) an offer-like screen was seen;
+ * 1) an offer-like screen was seen, either directly or by the working OCR offer capture;
  * 2) an in-ride marker was seen soon afterwards;
  * 3) an end-of-ride marker was seen after the in-ride state.
  *
@@ -34,6 +35,7 @@ class RideLifecycleAccessibilityService : AccessibilityService() {
     private const val OFFER_TO_RIDE_TIMEOUT_MS = 120_000L
     private const val IN_PROGRESS_STALE_MS = 6 * 60 * 60 * 1000L
     private const val PROMPT_COOLDOWN_MS = 15_000L
+    private const val RECENT_CAPTURED_OFFER_MS = 90_000L
 
     private val OFFER_MARKERS = listOf(
       "aceitar", "selecionar", "exclusivo", "priority", "prioritário", "negocia"
@@ -81,6 +83,18 @@ class RideLifecycleAccessibilityService : AccessibilityService() {
       state.state = "offer"
       persist(pkg, "offer", now)
       return
+    }
+
+    // Uber sometimes does not expose the offer text through AccessibilityNodeInfo even
+    // though the screenshot OCR service recognized the card. Reuse only a very recent,
+    // already-sanitized OCR offer as the first lifecycle signal. This keeps the working
+    // offer parser untouched while preventing the accepted ride from being lost.
+    if (state.lastOfferAt == 0L) {
+      val capturedAt = latestRecentCapturedOfferAt(pkg, now)
+      if (capturedAt > 0L) {
+        state.lastOfferAt = capturedAt
+        state.state = "offer"
+      }
     }
 
     if (
@@ -151,6 +165,27 @@ class RideLifecycleAccessibilityService : AccessibilityService() {
       }
     }
     return out.toString()
+  }
+
+  private fun latestRecentCapturedOfferAt(pkg: String, now: Long): Long {
+    return try {
+      val items = JSONArray(RideAccessibilityStore.read(applicationContext))
+      var best = 0L
+      for (i in items.length() - 1 downTo 0) {
+        val snapshot = items.optJSONObject(i) ?: continue
+        if (!snapshot.optString("packageName", "").equals(pkg, ignoreCase = true)) continue
+        val fingerprint = snapshot.optString("fingerprint", "")
+        if (!fingerprint.startsWith("screenshotOcrCard:")) continue
+        val capturedAt = snapshot.optLong("capturedAt", 0L)
+        if (capturedAt <= 0L || capturedAt > now) continue
+        if (now - capturedAt > RECENT_CAPTURED_OFFER_MS) break
+        best = maxOf(best, capturedAt)
+        if (best > 0L) break
+      }
+      best
+    } catch (_: Exception) {
+      0L
+    }
   }
 
   private fun containsAny(text: String, markers: List<String>): Boolean {
