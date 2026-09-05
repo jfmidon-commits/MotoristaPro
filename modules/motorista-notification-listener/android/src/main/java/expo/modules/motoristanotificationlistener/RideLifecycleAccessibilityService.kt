@@ -1,11 +1,14 @@
 package expo.modules.motoristanotificationlistener
 
 import android.accessibilityservice.AccessibilityService
+import android.graphics.Bitmap
 import android.graphics.Color
 import android.graphics.PixelFormat
 import android.graphics.drawable.GradientDrawable
+import android.os.Build
 import android.os.Handler
 import android.os.Looper
+import android.view.Display
 import android.view.Gravity
 import android.view.View
 import android.view.WindowManager
@@ -13,48 +16,58 @@ import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 import android.widget.LinearLayout
 import android.widget.TextView
+import com.google.mlkit.vision.common.InputImage
+import com.google.mlkit.vision.text.TextRecognition
+import com.google.mlkit.vision.text.latin.TextRecognizerOptions
 import org.json.JSONArray
 import org.json.JSONObject
 import java.util.Locale
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * Conservative ride lifecycle detector for Uber/99.
  *
- * It deliberately requires a strong sequence before prompting for payment:
- * 1) an offer-like screen was seen, either directly or by the working OCR offer capture;
- * 2) an accepted/in-ride marker was seen soon afterwards;
- * 3) an end-of-ride marker was seen after the accepted/in-ride state.
- *
- * This avoids interpreting a rejected/expired offer as a completed ride.
- * No passenger name/address is persisted.
+ * The accessibility tree is the cheap first path. Once an offer is known, a
+ * low-frequency screenshot OCR fallback keeps the lifecycle alive even when
+ * Uber/99 expose only a tiny or empty accessibility tree. State is persisted
+ * so Android recreating this service during a long ride does not forget the
+ * active trip.
  */
 class RideLifecycleAccessibilityService : AccessibilityService() {
   companion object {
     private const val UBER_PACKAGE = "com.ubercab.driver"
     private const val APP99_PACKAGE = "com.app99.driver"
-    private const val OFFER_TO_RIDE_TIMEOUT_MS = 120_000L
+    private const val OFFER_TO_RIDE_TIMEOUT_MS = 150_000L
     private const val IN_PROGRESS_STALE_MS = 6 * 60 * 60 * 1000L
     private const val PROMPT_COOLDOWN_MS = 15_000L
-    private const val RECENT_CAPTURED_OFFER_MS = 90_000L
+    private const val RECENT_CAPTURED_OFFER_MS = 120_000L
+    private const val POLL_INTERVAL_MS = 4_000L
+    private const val MIN_HOME_END_MS = 60_000L
 
     private val OFFER_MARKERS = listOf(
       "aceitar", "selecionar", "exclusivo", "priority", "prioritário", "negocia"
     )
     private val ACCEPTED_MARKERS = listOf(
       "corrida aceita", "viagem aceita", "solicitação aceita", "solicitacao aceita",
-      "aceita com sucesso", "ir para embarque", "buscar passageiro", "navegar até o passageiro",
-      "navegar ate o passageiro"
+      "aceita com sucesso", "ir para embarque", "buscar passageiro", "buscar o passageiro",
+      "navegar até o passageiro", "navegar ate o passageiro", "a caminho do passageiro"
     )
     private val IN_PROGRESS_MARKERS = listOf(
-      "a caminho", "cheguei", "iniciar viagem", "iniciar corrida", "finalizar viagem",
-      "encerrar viagem", "destino", "passageiro a bordo", "em viagem", "em corrida",
-      "deslize para iniciar", "deslize para finalizar"
+      "a caminho", "cheguei", "iniciar viagem", "iniciar corrida", "iniciar uberx",
+      "iniciar comfort", "finalizar viagem", "finalizar corrida", "encerrar viagem",
+      "destino", "passageiro a bordo", "em viagem", "em corrida",
+      "deslize para iniciar", "deslize para finalizar", "confirmar chegada"
     )
     private val ENDED_MARKERS = listOf(
       "corrida concluída", "corrida concluida", "viagem concluída", "viagem concluida",
-      "final da viagem", "fim da viagem", "avaliar passageiro", "como foi a viagem",
-      "você ganhou", "voce ganhou", "ganho desta viagem", "recebimento", "valor da viagem",
-      "corrida finalizada", "viagem finalizada"
+      "final da viagem", "fim da viagem", "avaliar passageiro", "avalie o passageiro",
+      "como foi a viagem", "como foi sua viagem", "você ganhou", "voce ganhou",
+      "ganho desta viagem", "recebimento", "valor da viagem", "corrida finalizada",
+      "viagem finalizada", "resumo da viagem", "resumo da corrida"
+    )
+    private val HOME_MARKERS = listOf(
+      "você está online", "voce esta online", "ficar offline", "buscar viagens",
+      "procurando viagens", "procurando corridas", "ganhos de hoje", "meta de ganhos"
     )
   }
 
@@ -70,65 +83,36 @@ class RideLifecycleAccessibilityService : AccessibilityService() {
     APP99_PACKAGE to PlatformState()
   )
   private val handler = Handler(Looper.getMainLooper())
+  private val screenshotInFlight = AtomicBoolean(false)
   private var paymentOverlay: View? = null
+  private var pollScheduled = false
+
+  private val recognizer by lazy {
+    TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
+  }
+
+  override fun onServiceConnected() {
+    super.onServiceConnected()
+    restoreState(UBER_PACKAGE)
+    restoreState(APP99_PACKAGE)
+    schedulePollIfNeeded()
+  }
 
   override fun onAccessibilityEvent(event: AccessibilityEvent?) {
-    if (event == null) return
-    if (!isRelevant(event.eventType)) return
+    if (event == null || !isRelevant(event.eventType)) return
     val pkg = event.packageName?.toString()?.lowercase(Locale.ROOT) ?: return
     if (pkg != UBER_PACKAGE && pkg != APP99_PACKAGE) return
-
-    val root = try { rootInActiveWindow } catch (_: Exception) { null } ?: return
-    val text = try { collectText(root) } finally { try { root.recycle() } catch (_: Exception) {} }
-    if (text.isBlank()) return
 
     val now = System.currentTimeMillis()
     val state = states[pkg] ?: return
 
-    if (containsAny(text, OFFER_MARKERS)) {
-      state.lastOfferAt = now
-      state.state = "offer"
-      persist(pkg, "offer", now)
-      return
-    }
+    if (state.lastOfferAt == 0L) recoverRecentOffer(pkg, state, now)
 
-    if (state.lastOfferAt == 0L) {
-      val capturedAt = latestRecentCapturedOfferAt(pkg, now)
-      if (capturedAt > 0L) {
-        state.lastOfferAt = capturedAt
-        state.state = "offer"
-        persist(pkg, "offer_recovered_from_ocr", capturedAt)
-      }
-    }
+    val text = collectActiveWindowTextFor(pkg)
+    if (text.isNotBlank()) evaluateText(pkg, state, text, now, "tree")
 
-    if (
-      state.lastOfferAt > 0L &&
-      now - state.lastOfferAt <= OFFER_TO_RIDE_TIMEOUT_MS &&
-      (containsAny(text, ACCEPTED_MARKERS) || containsAny(text, IN_PROGRESS_MARKERS))
-    ) {
-      if (state.state != "in_progress") {
-        state.inProgressAt = now
-        state.state = "in_progress"
-        persist(pkg, if (containsAny(text, ACCEPTED_MARKERS)) "accepted" else "in_progress", now)
-      }
-      return
-    }
-
-    if (state.state == "in_progress" && now - state.inProgressAt > IN_PROGRESS_STALE_MS) {
-      reset(state)
-      persist(pkg, "stale_reset", now)
-      return
-    }
-
-    if (
-      state.state == "in_progress" &&
-      containsAny(text, ENDED_MARKERS) &&
-      now - state.lastPromptAt >= PROMPT_COOLDOWN_MS
-    ) {
-      state.state = "ended"
-      state.lastPromptAt = now
-      persist(pkg, "ended", now)
-      showPaymentPrompt(pkg, now)
+    if (state.state == "offer" || state.state == "in_progress") {
+      schedulePollIfNeeded()
     }
   }
 
@@ -136,6 +120,8 @@ class RideLifecycleAccessibilityService : AccessibilityService() {
 
   override fun onDestroy() {
     hidePaymentPrompt()
+    handler.removeCallbacksAndMessages(null)
+    try { recognizer.close() } catch (_: Exception) {}
     super.onDestroy()
   }
 
@@ -146,20 +132,91 @@ class RideLifecycleAccessibilityService : AccessibilityService() {
       type == AccessibilityEvent.TYPE_VIEW_SCROLLED
   }
 
+  private fun evaluateText(pkg: String, state: PlatformState, rawText: String, now: Long, source: String) {
+    val text = normalize(rawText)
+    if (text.isBlank()) return
+
+    if (state.state == "idle" && containsAny(text, OFFER_MARKERS)) {
+      state.lastOfferAt = now
+      state.state = "offer"
+      saveState(pkg, state)
+      persist(pkg, "offer", now, source = source)
+      schedulePollIfNeeded()
+      return
+    }
+
+    if (state.lastOfferAt == 0L) recoverRecentOffer(pkg, state, now)
+
+    if (
+      state.lastOfferAt > 0L &&
+      now - state.lastOfferAt <= OFFER_TO_RIDE_TIMEOUT_MS &&
+      state.state != "in_progress" &&
+      (containsAny(text, ACCEPTED_MARKERS) || containsAny(text, IN_PROGRESS_MARKERS))
+    ) {
+      state.inProgressAt = now
+      state.state = "in_progress"
+      saveState(pkg, state)
+      persist(
+        pkg,
+        if (containsAny(text, ACCEPTED_MARKERS)) "accepted" else "in_progress",
+        now,
+        source = source
+      )
+      schedulePollIfNeeded()
+      return
+    }
+
+    if (state.state == "offer" && now - state.lastOfferAt > OFFER_TO_RIDE_TIMEOUT_MS) {
+      reset(pkg, state)
+      persist(pkg, "offer_timeout", now, source = source)
+      return
+    }
+
+    if (state.state == "in_progress" && now - state.inProgressAt > IN_PROGRESS_STALE_MS) {
+      reset(pkg, state)
+      persist(pkg, "stale_reset", now, source = source)
+      return
+    }
+
+    if (state.state == "in_progress") {
+      val explicitEnd = containsAny(text, ENDED_MARKERS)
+      val returnedHome = state.inProgressAt > 0L &&
+        now - state.inProgressAt >= MIN_HOME_END_MS &&
+        containsAny(text, HOME_MARKERS)
+      if ((explicitEnd || returnedHome) && now - state.lastPromptAt >= PROMPT_COOLDOWN_MS) {
+        state.state = "ended"
+        state.lastPromptAt = now
+        saveState(pkg, state)
+        persist(pkg, if (explicitEnd) "ended" else "ended_home_screen", now, source = source)
+        showPaymentPrompt(pkg, now)
+      }
+    }
+  }
+
+  private fun collectActiveWindowTextFor(pkg: String): String {
+    val root = try { rootInActiveWindow } catch (_: Exception) { null } ?: return ""
+    return try {
+      val rootPkg = try { root.packageName?.toString()?.lowercase(Locale.ROOT) } catch (_: Exception) { null }
+      if (rootPkg != pkg) "" else collectText(root)
+    } finally {
+      try { root.recycle() } catch (_: Exception) {}
+    }
+  }
+
   private fun collectText(root: AccessibilityNodeInfo): String {
     val out = StringBuilder()
     val queue = ArrayDeque<AccessibilityNodeInfo>()
     queue.add(root)
     var visited = 0
 
-    while (queue.isNotEmpty() && visited < 160) {
+    while (queue.isNotEmpty() && visited < 220) {
       val node = queue.removeFirst()
       visited += 1
       try {
         val text = node.text?.toString()?.trim()
         val desc = node.contentDescription?.toString()?.trim()
-        if (!text.isNullOrBlank()) out.append(' ').append(text.lowercase(Locale.ROOT))
-        if (!desc.isNullOrBlank()) out.append(' ').append(desc.lowercase(Locale.ROOT))
+        if (!text.isNullOrBlank()) out.append(' ').append(text)
+        if (!desc.isNullOrBlank()) out.append(' ').append(desc)
         for (i in 0 until node.childCount) {
           val child = try { node.getChild(i) } catch (_: Exception) { null }
           if (child != null) queue.add(child)
@@ -171,45 +228,212 @@ class RideLifecycleAccessibilityService : AccessibilityService() {
     return out.toString()
   }
 
+  private fun schedulePollIfNeeded() {
+    if (pollScheduled) return
+    if (states.values.none { it.state == "offer" || it.state == "in_progress" }) return
+    pollScheduled = true
+    handler.postDelayed({
+      pollScheduled = false
+      pollActiveLifecycle()
+      schedulePollIfNeeded()
+    }, POLL_INTERVAL_MS)
+  }
+
+  private fun pollActiveLifecycle() {
+    val now = System.currentTimeMillis()
+    for ((pkg, state) in states) {
+      if (state.state != "offer" && state.state != "in_progress") continue
+
+      if (state.state == "offer" && now - state.lastOfferAt > OFFER_TO_RIDE_TIMEOUT_MS) {
+        reset(pkg, state)
+        persist(pkg, "offer_timeout", now, source = "poll")
+        continue
+      }
+      if (state.state == "in_progress" && now - state.inProgressAt > IN_PROGRESS_STALE_MS) {
+        reset(pkg, state)
+        persist(pkg, "stale_reset", now, source = "poll")
+        continue
+      }
+
+      val treeText = collectActiveWindowTextFor(pkg)
+      if (treeText.isNotBlank()) {
+        evaluateText(pkg, state, treeText, now, "poll_tree")
+        if (state.state == "ended" || state.state == "idle") continue
+      }
+
+      if (isPackageVisible(pkg)) {
+        requestLifecycleScreenshot(pkg)
+        break
+      }
+    }
+  }
+
+  private fun isPackageVisible(pkg: String): Boolean {
+    return try {
+      windows.orEmpty().any { window ->
+        val root = try { window.root } catch (_: Exception) { null }
+        try {
+          root?.packageName?.toString()?.equals(pkg, ignoreCase = true) == true &&
+            window.type == android.view.accessibility.AccessibilityWindowInfo.TYPE_APPLICATION &&
+            (window.isActive || window.isFocused)
+        } finally {
+          try { root?.recycle() } catch (_: Exception) {}
+        }
+      }
+    } catch (_: Exception) {
+      false
+    }
+  }
+
+  private fun requestLifecycleScreenshot(pkg: String) {
+    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return
+    if (!screenshotInFlight.compareAndSet(false, true)) return
+
+    try {
+      takeScreenshot(
+        Display.DEFAULT_DISPLAY,
+        mainExecutor,
+        object : TakeScreenshotCallback {
+          override fun onSuccess(screenshot: ScreenshotResult) {
+            val buffer = screenshot.hardwareBuffer
+            var hardwareBitmap: Bitmap? = null
+            var softwareBitmap: Bitmap? = null
+            try {
+              hardwareBitmap = Bitmap.wrapHardwareBuffer(buffer, screenshot.colorSpace)
+              softwareBitmap = hardwareBitmap?.copy(Bitmap.Config.ARGB_8888, false)
+              val bitmap = softwareBitmap
+              if (bitmap == null) {
+                screenshotInFlight.set(false)
+                return
+              }
+
+              recognizer.process(InputImage.fromBitmap(bitmap, 0))
+                .addOnSuccessListener { result ->
+                  try {
+                    val state = states[pkg] ?: return@addOnSuccessListener
+                    evaluateText(pkg, state, result.text, System.currentTimeMillis(), "ocr")
+                  } finally {
+                    try { bitmap.recycle() } catch (_: Exception) {}
+                    screenshotInFlight.set(false)
+                  }
+                }
+                .addOnFailureListener {
+                  try { bitmap.recycle() } catch (_: Exception) {}
+                  screenshotInFlight.set(false)
+                }
+            } catch (_: Exception) {
+              try { softwareBitmap?.recycle() } catch (_: Exception) {}
+              screenshotInFlight.set(false)
+            } finally {
+              try { hardwareBitmap?.recycle() } catch (_: Exception) {}
+              try { buffer.close() } catch (_: Exception) {}
+            }
+          }
+
+          override fun onFailure(errorCode: Int) {
+            screenshotInFlight.set(false)
+          }
+        }
+      )
+    } catch (_: Exception) {
+      screenshotInFlight.set(false)
+    }
+  }
+
+  private fun recoverRecentOffer(pkg: String, state: PlatformState, now: Long) {
+    val capturedAt = latestRecentCapturedOfferAt(pkg, now)
+    if (capturedAt <= 0L) return
+    state.lastOfferAt = capturedAt
+    state.state = "offer"
+    saveState(pkg, state)
+    persist(pkg, "offer_recovered_from_ocr", capturedAt, source = "capture_store")
+  }
+
   private fun latestRecentCapturedOfferAt(pkg: String, now: Long): Long {
     return try {
       val items = JSONArray(RideAccessibilityStore.read(applicationContext))
-      var best = 0L
       for (i in items.length() - 1 downTo 0) {
         val snapshot = items.optJSONObject(i) ?: continue
         if (!snapshot.optString("packageName", "").equals(pkg, ignoreCase = true)) continue
         val fingerprint = snapshot.optString("fingerprint", "")
-        val isValidOfferCapture = when (pkg) {
+        val valid = when (pkg) {
           UBER_PACKAGE -> fingerprint.startsWith("screenshotOcrCard:")
           APP99_PACKAGE -> fingerprint.startsWith("screenshotOcr99:")
           else -> false
         }
-        if (!isValidOfferCapture) continue
+        if (!valid) continue
         val capturedAt = snapshot.optLong("capturedAt", 0L)
         if (capturedAt <= 0L || capturedAt > now) continue
-        if (now - capturedAt > RECENT_CAPTURED_OFFER_MS) break
-        best = maxOf(best, capturedAt)
-        if (best > 0L) break
+        if (now - capturedAt <= RECENT_CAPTURED_OFFER_MS) return capturedAt
       }
-      best
+      0L
     } catch (_: Exception) {
       0L
     }
+  }
+
+  private fun restoreState(pkg: String) {
+    val platform = platformKey(pkg)
+    val saved = RideLifecycleStore.readPlatformState(applicationContext, platform) ?: return
+    val state = states[pkg] ?: return
+    val now = System.currentTimeMillis()
+    val savedState = saved.optString("state", "idle")
+    val lastOfferAt = saved.optLong("lastOfferAt", 0L)
+    val inProgressAt = saved.optLong("inProgressAt", 0L)
+    val lastPromptAt = saved.optLong("lastPromptAt", 0L)
+
+    val valid = when (savedState) {
+      "offer" -> lastOfferAt > 0L && now - lastOfferAt <= OFFER_TO_RIDE_TIMEOUT_MS
+      "in_progress" -> inProgressAt > 0L && now - inProgressAt <= IN_PROGRESS_STALE_MS
+      "ended" -> lastPromptAt > 0L && now - lastPromptAt <= 10 * 60 * 1000L
+      else -> false
+    }
+
+    if (!valid) {
+      RideLifecycleStore.clearPlatformState(applicationContext, platform)
+      return
+    }
+
+    state.lastOfferAt = lastOfferAt
+    state.inProgressAt = inProgressAt
+    state.lastPromptAt = lastPromptAt
+    state.state = savedState
+    persist(pkg, "state_restored_$savedState", now, source = "store")
+  }
+
+  private fun saveState(pkg: String, state: PlatformState) {
+    RideLifecycleStore.writePlatformState(applicationContext, platformKey(pkg), JSONObject().apply {
+      put("state", state.state)
+      put("lastOfferAt", state.lastOfferAt)
+      put("inProgressAt", state.inProgressAt)
+      put("lastPromptAt", state.lastPromptAt)
+      put("savedAt", System.currentTimeMillis())
+    })
   }
 
   private fun containsAny(text: String, markers: List<String>): Boolean {
     return markers.any { text.contains(it) }
   }
 
+  private fun normalize(text: String): String = text.lowercase(Locale.ROOT)
+
+  private fun platformKey(pkg: String): String = if (pkg == APP99_PACKAGE) "99" else "uber"
   private fun platformLabel(pkg: String): String = if (pkg == APP99_PACKAGE) "99" else "Uber"
 
-  private fun persist(pkg: String, state: String, at: Long, paymentMethod: String? = null) {
+  private fun persist(
+    pkg: String,
+    state: String,
+    at: Long,
+    paymentMethod: String? = null,
+    source: String? = null
+  ) {
     try {
       RideLifecycleStore.append(applicationContext, JSONObject().apply {
-        put("platform", if (pkg == APP99_PACKAGE) "99" else "uber")
+        put("platform", platformKey(pkg))
         put("state", state)
         put("detectedAt", at)
         if (paymentMethod != null) put("paymentMethod", paymentMethod)
+        if (source != null) put("source", source)
       })
     } catch (_: Exception) {}
   }
@@ -299,8 +523,8 @@ class RideLifecycleAccessibilityService : AccessibilityService() {
   }
 
   private fun choosePayment(pkg: String, detectedAt: Long, method: String) {
-    persist(pkg, "payment_confirmed", detectedAt, method)
-    states[pkg]?.let(::reset)
+    persist(pkg, "payment_confirmed", detectedAt, method, "overlay")
+    states[pkg]?.let { reset(pkg, it) }
     hidePaymentPrompt()
   }
 
@@ -313,10 +537,12 @@ class RideLifecycleAccessibilityService : AccessibilityService() {
     } catch (_: Exception) {}
   }
 
-  private fun reset(state: PlatformState) {
+  private fun reset(pkg: String, state: PlatformState) {
     state.lastOfferAt = 0L
     state.inProgressAt = 0L
+    state.lastPromptAt = 0L
     state.state = "idle"
+    RideLifecycleStore.clearPlatformState(applicationContext, platformKey(pkg))
   }
 
   private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()
