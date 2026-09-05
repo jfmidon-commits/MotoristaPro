@@ -22,8 +22,8 @@ import java.util.Locale
  *
  * It deliberately requires a strong sequence before prompting for payment:
  * 1) an offer-like screen was seen, either directly or by the working OCR offer capture;
- * 2) an in-ride marker was seen soon afterwards;
- * 3) an end-of-ride marker was seen after the in-ride state.
+ * 2) an accepted/in-ride marker was seen soon afterwards;
+ * 3) an end-of-ride marker was seen after the accepted/in-ride state.
  *
  * This avoids interpreting a rejected/expired offer as a completed ride.
  * No passenger name/address is persisted.
@@ -40,14 +40,21 @@ class RideLifecycleAccessibilityService : AccessibilityService() {
     private val OFFER_MARKERS = listOf(
       "aceitar", "selecionar", "exclusivo", "priority", "prioritário", "negocia"
     )
+    private val ACCEPTED_MARKERS = listOf(
+      "corrida aceita", "viagem aceita", "solicitação aceita", "solicitacao aceita",
+      "aceita com sucesso", "ir para embarque", "buscar passageiro", "navegar até o passageiro",
+      "navegar ate o passageiro"
+    )
     private val IN_PROGRESS_MARKERS = listOf(
       "a caminho", "cheguei", "iniciar viagem", "iniciar corrida", "finalizar viagem",
-      "encerrar viagem", "destino", "passageiro a bordo", "em viagem"
+      "encerrar viagem", "destino", "passageiro a bordo", "em viagem", "em corrida",
+      "deslize para iniciar", "deslize para finalizar"
     )
     private val ENDED_MARKERS = listOf(
-      "corrida concluída", "viagem concluída", "final da viagem", "fim da viagem",
-      "avaliar passageiro", "como foi a viagem", "você ganhou", "voce ganhou",
-      "ganho desta viagem", "recebimento", "valor da viagem"
+      "corrida concluída", "corrida concluida", "viagem concluída", "viagem concluida",
+      "final da viagem", "fim da viagem", "avaliar passageiro", "como foi a viagem",
+      "você ganhou", "voce ganhou", "ganho desta viagem", "recebimento", "valor da viagem",
+      "corrida finalizada", "viagem finalizada"
     )
   }
 
@@ -85,27 +92,24 @@ class RideLifecycleAccessibilityService : AccessibilityService() {
       return
     }
 
-    // Uber sometimes does not expose the offer text through AccessibilityNodeInfo even
-    // though the screenshot OCR service recognized the card. Reuse only a very recent,
-    // already-sanitized OCR offer as the first lifecycle signal. This keeps the working
-    // offer parser untouched while preventing the accepted ride from being lost.
     if (state.lastOfferAt == 0L) {
       val capturedAt = latestRecentCapturedOfferAt(pkg, now)
       if (capturedAt > 0L) {
         state.lastOfferAt = capturedAt
         state.state = "offer"
+        persist(pkg, "offer_recovered_from_ocr", capturedAt)
       }
     }
 
     if (
       state.lastOfferAt > 0L &&
       now - state.lastOfferAt <= OFFER_TO_RIDE_TIMEOUT_MS &&
-      containsAny(text, IN_PROGRESS_MARKERS)
+      (containsAny(text, ACCEPTED_MARKERS) || containsAny(text, IN_PROGRESS_MARKERS))
     ) {
       if (state.state != "in_progress") {
         state.inProgressAt = now
         state.state = "in_progress"
-        persist(pkg, "in_progress", now)
+        persist(pkg, if (containsAny(text, ACCEPTED_MARKERS)) "accepted" else "in_progress", now)
       }
       return
     }
@@ -175,7 +179,12 @@ class RideLifecycleAccessibilityService : AccessibilityService() {
         val snapshot = items.optJSONObject(i) ?: continue
         if (!snapshot.optString("packageName", "").equals(pkg, ignoreCase = true)) continue
         val fingerprint = snapshot.optString("fingerprint", "")
-        if (!fingerprint.startsWith("screenshotOcrCard:")) continue
+        val isValidOfferCapture = when (pkg) {
+          UBER_PACKAGE -> fingerprint.startsWith("screenshotOcrCard:")
+          APP99_PACKAGE -> fingerprint.startsWith("screenshotOcr99:")
+          else -> false
+        }
+        if (!isValidOfferCapture) continue
         val capturedAt = snapshot.optLong("capturedAt", 0L)
         if (capturedAt <= 0L || capturedAt > now) continue
         if (now - capturedAt > RECENT_CAPTURED_OFFER_MS) break
