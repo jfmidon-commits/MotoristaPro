@@ -40,7 +40,9 @@ class MotoristaNotificationListenerModule : Module() {
 
     Function("getAccessibilityPermissionStatus") {
       val context = appContext.reactContext ?: return@Function "unavailable"
-      if (isAccessibilityServiceEnabled(context, "RideAccessibilityService")) "granted" else "denied"
+      val captureEnabled = isAccessibilityServiceEnabled(context, "RideAccessibilityService")
+      val lifecycleEnabled = isAccessibilityServiceEnabled(context, "RideLifecycleAccessibilityService")
+      if (captureEnabled && lifecycleEnabled) "granted" else "denied"
     }
 
     Function("getRideLifecyclePermissionStatus") {
