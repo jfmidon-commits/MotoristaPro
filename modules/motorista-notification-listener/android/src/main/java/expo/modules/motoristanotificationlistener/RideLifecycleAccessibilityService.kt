@@ -27,18 +27,19 @@ import java.util.concurrent.atomic.AtomicBoolean
 /**
  * Conservative ride lifecycle detector for Uber/99.
  *
- * The accessibility tree is the cheap first path. Once an offer is known, a
- * low-frequency screenshot OCR fallback keeps the lifecycle alive even when
- * Uber/99 expose only a tiny or empty accessibility tree. State is persisted
- * so Android recreating this service during a long ride does not forget the
- * active trip.
+ * Lifecycle is deliberately split into four phases:
+ * offer -> pickup -> in_trip -> ended.
+ * A payment prompt is only allowed after a strong in-trip marker has been seen
+ * and then a strong completion marker (or a confirmed return to the home
+ * screen). This prevents the payment prompt from appearing while the driver is
+ * still heading to the passenger or while the trip is still active.
  */
 class RideLifecycleAccessibilityService : AccessibilityService() {
   companion object {
     private const val UBER_PACKAGE = "com.ubercab.driver"
     private const val APP99_PACKAGE = "com.app99.driver"
     private const val OFFER_TO_RIDE_TIMEOUT_MS = 150_000L
-    private const val IN_PROGRESS_STALE_MS = 6 * 60 * 60 * 1000L
+    private const val ACTIVE_RIDE_STALE_MS = 6 * 60 * 60 * 1000L
     private const val PROMPT_COOLDOWN_MS = 15_000L
     private const val RECENT_CAPTURED_OFFER_MS = 120_000L
     private const val POLL_INTERVAL_MS = 4_000L
@@ -47,24 +48,34 @@ class RideLifecycleAccessibilityService : AccessibilityService() {
     private val OFFER_MARKERS = listOf(
       "aceitar", "selecionar", "exclusivo", "priority", "prioritário", "negocia"
     )
-    private val ACCEPTED_MARKERS = listOf(
+
+    // Accepted / heading to pickup. These markers must NOT mean that the paid
+    // trip has started yet.
+    private val PICKUP_MARKERS = listOf(
       "corrida aceita", "viagem aceita", "solicitação aceita", "solicitacao aceita",
       "aceita com sucesso", "ir para embarque", "buscar passageiro", "buscar o passageiro",
-      "navegar até o passageiro", "navegar ate o passageiro", "a caminho do passageiro"
+      "navegar até o passageiro", "navegar ate o passageiro", "a caminho do passageiro",
+      "encontro com", "cheguei", "confirmar chegada", "deslize para iniciar",
+      "iniciar viagem", "iniciar corrida", "iniciar uberx", "iniciar comfort"
     )
-    private val IN_PROGRESS_MARKERS = listOf(
-      "a caminho", "cheguei", "iniciar viagem", "iniciar corrida", "iniciar uberx",
-      "iniciar comfort", "finalizar viagem", "finalizar corrida", "encerrar viagem",
-      "destino", "passageiro a bordo", "em viagem", "em corrida",
-      "deslize para iniciar", "deslize para finalizar", "confirmar chegada"
+
+    // Strong evidence that the passenger is aboard and the actual trip is in
+    // progress. Generic words such as "destino" or "a caminho" are avoided.
+    private val TRIP_STARTED_MARKERS = listOf(
+      "passageiro a bordo", "em viagem", "em corrida", "destino de",
+      "deslize para finalizar", "finalizar viagem", "finalizar corrida",
+      "encerrar viagem", "encerrar corrida"
     )
+
+    // Only strong post-trip screens belong here. Generic fare/payment words
+    // were intentionally removed because they can exist before completion.
     private val ENDED_MARKERS = listOf(
       "corrida concluída", "corrida concluida", "viagem concluída", "viagem concluida",
-      "final da viagem", "fim da viagem", "avaliar passageiro", "avalie o passageiro",
-      "como foi a viagem", "como foi sua viagem", "você ganhou", "voce ganhou",
-      "ganho desta viagem", "recebimento", "valor da viagem", "corrida finalizada",
-      "viagem finalizada", "resumo da viagem", "resumo da corrida"
+      "avaliar passageiro", "avalie o passageiro", "como foi a viagem",
+      "como foi sua viagem", "você ganhou", "voce ganhou", "ganho desta viagem",
+      "corrida finalizada", "viagem finalizada", "resumo da viagem", "resumo da corrida"
     )
+
     private val HOME_MARKERS = listOf(
       "você está online", "voce esta online", "ficar offline", "buscar viagens",
       "procurando viagens", "procurando corridas", "ganhos de hoje", "meta de ganhos"
@@ -73,7 +84,8 @@ class RideLifecycleAccessibilityService : AccessibilityService() {
 
   private data class PlatformState(
     var lastOfferAt: Long = 0L,
-    var inProgressAt: Long = 0L,
+    var pickupAt: Long = 0L,
+    var tripStartedAt: Long = 0L,
     var lastPromptAt: Long = 0L,
     var state: String = "idle"
   )
@@ -105,15 +117,11 @@ class RideLifecycleAccessibilityService : AccessibilityService() {
 
     val now = System.currentTimeMillis()
     val state = states[pkg] ?: return
-
     if (state.lastOfferAt == 0L) recoverRecentOffer(pkg, state, now)
 
     val text = collectActiveWindowTextFor(pkg)
     if (text.isNotBlank()) evaluateText(pkg, state, text, now, "tree")
-
-    if (state.state == "offer" || state.state == "in_progress") {
-      schedulePollIfNeeded()
-    }
+    if (isActiveState(state.state)) schedulePollIfNeeded()
   }
 
   override fun onInterrupt() {}
@@ -132,6 +140,10 @@ class RideLifecycleAccessibilityService : AccessibilityService() {
       type == AccessibilityEvent.TYPE_VIEW_SCROLLED
   }
 
+  private fun isActiveState(state: String): Boolean {
+    return state == "offer" || state == "pickup" || state == "in_trip"
+  }
+
   private fun evaluateText(pkg: String, state: PlatformState, rawText: String, now: Long, source: String) {
     val text = normalize(rawText)
     if (text.isBlank()) return
@@ -148,20 +160,24 @@ class RideLifecycleAccessibilityService : AccessibilityService() {
     if (state.lastOfferAt == 0L) recoverRecentOffer(pkg, state, now)
 
     if (
+      state.state == "offer" &&
       state.lastOfferAt > 0L &&
       now - state.lastOfferAt <= OFFER_TO_RIDE_TIMEOUT_MS &&
-      state.state != "in_progress" &&
-      (containsAny(text, ACCEPTED_MARKERS) || containsAny(text, IN_PROGRESS_MARKERS))
+      containsAny(text, PICKUP_MARKERS)
     ) {
-      state.inProgressAt = now
-      state.state = "in_progress"
+      state.pickupAt = now
+      state.state = "pickup"
       saveState(pkg, state)
-      persist(
-        pkg,
-        if (containsAny(text, ACCEPTED_MARKERS)) "accepted" else "in_progress",
-        now,
-        source = source
-      )
+      persist(pkg, "pickup", now, source = source)
+      schedulePollIfNeeded()
+      return
+    }
+
+    if ((state.state == "offer" || state.state == "pickup") && containsAny(text, TRIP_STARTED_MARKERS)) {
+      state.tripStartedAt = now
+      state.state = "in_trip"
+      saveState(pkg, state)
+      persist(pkg, "in_trip", now, source = source)
       schedulePollIfNeeded()
       return
     }
@@ -172,16 +188,21 @@ class RideLifecycleAccessibilityService : AccessibilityService() {
       return
     }
 
-    if (state.state == "in_progress" && now - state.inProgressAt > IN_PROGRESS_STALE_MS) {
+    val activeSince = when (state.state) {
+      "pickup" -> state.pickupAt
+      "in_trip" -> state.tripStartedAt
+      else -> 0L
+    }
+    if (activeSince > 0L && now - activeSince > ACTIVE_RIDE_STALE_MS) {
       reset(pkg, state)
       persist(pkg, "stale_reset", now, source = source)
       return
     }
 
-    if (state.state == "in_progress") {
+    if (state.state == "in_trip") {
       val explicitEnd = containsAny(text, ENDED_MARKERS)
-      val returnedHome = state.inProgressAt > 0L &&
-        now - state.inProgressAt >= MIN_HOME_END_MS &&
+      val returnedHome = state.tripStartedAt > 0L &&
+        now - state.tripStartedAt >= MIN_HOME_END_MS &&
         containsAny(text, HOME_MARKERS)
       if ((explicitEnd || returnedHome) && now - state.lastPromptAt >= PROMPT_COOLDOWN_MS) {
         state.state = "ended"
@@ -208,7 +229,6 @@ class RideLifecycleAccessibilityService : AccessibilityService() {
     val queue = ArrayDeque<AccessibilityNodeInfo>()
     queue.add(root)
     var visited = 0
-
     while (queue.isNotEmpty() && visited < 220) {
       val node = queue.removeFirst()
       visited += 1
@@ -230,7 +250,7 @@ class RideLifecycleAccessibilityService : AccessibilityService() {
 
   private fun schedulePollIfNeeded() {
     if (pollScheduled) return
-    if (states.values.none { it.state == "offer" || it.state == "in_progress" }) return
+    if (states.values.none { isActiveState(it.state) }) return
     pollScheduled = true
     handler.postDelayed({
       pollScheduled = false
@@ -242,14 +262,16 @@ class RideLifecycleAccessibilityService : AccessibilityService() {
   private fun pollActiveLifecycle() {
     val now = System.currentTimeMillis()
     for ((pkg, state) in states) {
-      if (state.state != "offer" && state.state != "in_progress") continue
+      if (!isActiveState(state.state)) continue
 
       if (state.state == "offer" && now - state.lastOfferAt > OFFER_TO_RIDE_TIMEOUT_MS) {
         reset(pkg, state)
         persist(pkg, "offer_timeout", now, source = "poll")
         continue
       }
-      if (state.state == "in_progress" && now - state.inProgressAt > IN_PROGRESS_STALE_MS) {
+
+      val activeSince = if (state.state == "in_trip") state.tripStartedAt else state.pickupAt
+      if (activeSince > 0L && now - activeSince > ACTIVE_RIDE_STALE_MS) {
         reset(pkg, state)
         persist(pkg, "stale_reset", now, source = "poll")
         continue
@@ -306,7 +328,6 @@ class RideLifecycleAccessibilityService : AccessibilityService() {
                 screenshotInFlight.set(false)
                 return
               }
-
               recognizer.process(InputImage.fromBitmap(bitmap, 0))
                 .addOnSuccessListener { result ->
                   try {
@@ -379,12 +400,14 @@ class RideLifecycleAccessibilityService : AccessibilityService() {
     val now = System.currentTimeMillis()
     val savedState = saved.optString("state", "idle")
     val lastOfferAt = saved.optLong("lastOfferAt", 0L)
-    val inProgressAt = saved.optLong("inProgressAt", 0L)
+    val pickupAt = saved.optLong("pickupAt", 0L)
+    val tripStartedAt = saved.optLong("tripStartedAt", saved.optLong("inProgressAt", 0L))
     val lastPromptAt = saved.optLong("lastPromptAt", 0L)
 
     val valid = when (savedState) {
       "offer" -> lastOfferAt > 0L && now - lastOfferAt <= OFFER_TO_RIDE_TIMEOUT_MS
-      "in_progress" -> inProgressAt > 0L && now - inProgressAt <= IN_PROGRESS_STALE_MS
+      "pickup" -> pickupAt > 0L && now - pickupAt <= ACTIVE_RIDE_STALE_MS
+      "in_trip", "in_progress" -> tripStartedAt > 0L && now - tripStartedAt <= ACTIVE_RIDE_STALE_MS
       "ended" -> lastPromptAt > 0L && now - lastPromptAt <= 10 * 60 * 1000L
       else -> false
     }
@@ -395,38 +418,30 @@ class RideLifecycleAccessibilityService : AccessibilityService() {
     }
 
     state.lastOfferAt = lastOfferAt
-    state.inProgressAt = inProgressAt
+    state.pickupAt = pickupAt
+    state.tripStartedAt = tripStartedAt
     state.lastPromptAt = lastPromptAt
-    state.state = savedState
-    persist(pkg, "state_restored_$savedState", now, source = "store")
+    state.state = if (savedState == "in_progress") "in_trip" else savedState
+    persist(pkg, "state_restored_${state.state}", now, source = "store")
   }
 
   private fun saveState(pkg: String, state: PlatformState) {
     RideLifecycleStore.writePlatformState(applicationContext, platformKey(pkg), JSONObject().apply {
       put("state", state.state)
       put("lastOfferAt", state.lastOfferAt)
-      put("inProgressAt", state.inProgressAt)
+      put("pickupAt", state.pickupAt)
+      put("tripStartedAt", state.tripStartedAt)
       put("lastPromptAt", state.lastPromptAt)
       put("savedAt", System.currentTimeMillis())
     })
   }
 
-  private fun containsAny(text: String, markers: List<String>): Boolean {
-    return markers.any { text.contains(it) }
-  }
-
+  private fun containsAny(text: String, markers: List<String>): Boolean = markers.any { text.contains(it) }
   private fun normalize(text: String): String = text.lowercase(Locale.ROOT)
-
   private fun platformKey(pkg: String): String = if (pkg == APP99_PACKAGE) "99" else "uber"
   private fun platformLabel(pkg: String): String = if (pkg == APP99_PACKAGE) "99" else "Uber"
 
-  private fun persist(
-    pkg: String,
-    state: String,
-    at: Long,
-    paymentMethod: String? = null,
-    source: String? = null
-  ) {
+  private fun persist(pkg: String, state: String, at: Long, paymentMethod: String? = null, source: String? = null) {
     try {
       RideLifecycleStore.append(applicationContext, JSONObject().apply {
         put("platform", platformKey(pkg))
@@ -480,7 +495,7 @@ class RideLifecycleAccessibilityService : AccessibilityService() {
         (resources.displayMetrics.widthPixels * 0.92f).toInt(),
         WindowManager.LayoutParams.WRAP_CONTENT,
         WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
-        WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+        WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
         PixelFormat.TRANSLUCENT
       ).apply {
         gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
@@ -510,7 +525,7 @@ class RideLifecycleAccessibilityService : AccessibilityService() {
         setColor(Color.rgb(30, 41, 59))
       }
       isClickable = true
-      isFocusable = true
+      isFocusable = false
       setOnClickListener { onClick() }
     }
   }
@@ -539,7 +554,8 @@ class RideLifecycleAccessibilityService : AccessibilityService() {
 
   private fun reset(pkg: String, state: PlatformState) {
     state.lastOfferAt = 0L
-    state.inProgressAt = 0L
+    state.pickupAt = 0L
+    state.tripStartedAt = 0L
     state.lastPromptAt = 0L
     state.state = "idle"
     RideLifecycleStore.clearPlatformState(applicationContext, platformKey(pkg))
