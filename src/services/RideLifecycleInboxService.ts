@@ -3,6 +3,7 @@ import {
   clearPendingRideLifecycleEvents,
   getPendingAccessibilitySnapshots,
   getPendingRideLifecycleEvents,
+  type AccessibilitySnapshot,
   type RideLifecycleNativeEvent
 } from "../../modules/motorista-notification-listener";
 import { parseAccessibilitySnapshot } from "@/services/AccessibilityOfferParser";
@@ -49,6 +50,43 @@ function paymentMethod(event: RideLifecycleNativeEvent): RidePaymentMethod | nul
   return null;
 }
 
+function parseLocaleNumber(value: string): number | null {
+  const cleaned = value.trim().replace(/\./g, "").replace(",", ".");
+  const parsed = Number.parseFloat(cleaned);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function recover99Summary(snapshot: AccessibilitySnapshot) {
+  if ((snapshot.packageName ?? "").toLowerCase() !== "com.app99.driver") return null;
+  if (!(snapshot.fingerprint ?? "").startsWith("screenshotOcr99:")) return null;
+
+  const text = (snapshot.nodes ?? []).map((node) => node.text ?? "").join(" ");
+  const match = text.match(
+    /99\s*•\s*R\$\s*([0-9.,]+)\s*•\s*TOTAL\s*([0-9.,]+)\s*km\s*•\s*([0-9]+)\s*min/i
+  );
+  if (!match) return null;
+
+  const fare = parseLocaleNumber(match[1]);
+  const totalKm = parseLocaleNumber(match[2]);
+  const totalMinutes = Number.parseInt(match[3], 10);
+  if (!fare || !totalKm || !Number.isFinite(totalMinutes) || fare <= 0 || totalKm <= 0 || totalMinutes <= 0) {
+    return null;
+  }
+
+  try {
+    return normalizeRideOffer({
+      platform: "99",
+      offeredAmount: fare,
+      totalExpectedDistanceKm: totalKm,
+      totalExpectedDurationMinutes: totalMinutes,
+      extractionConfidence: 0.98,
+      capturedAt: new Date(snapshot.capturedAt ?? Date.now())
+    });
+  } catch {
+    return null;
+  }
+}
+
 function findBestOffer(event: RideLifecycleNativeEvent) {
   const packageName = packageForPlatform(event.platform);
   const candidates = getPendingAccessibilitySnapshots()
@@ -58,6 +96,9 @@ function findBestOffer(event: RideLifecycleNativeEvent) {
       return at > 0 && at <= event.detectedAt && event.detectedAt - at <= MAX_MATCH_AGE_MS;
     })
     .map((snapshot) => {
+      const recovered99 = recover99Summary(snapshot);
+      if (recovered99) return { offer: recovered99, capturedAt: snapshot.capturedAt ?? 0 };
+
       const raw = parseAccessibilitySnapshot(snapshot);
       if (!raw) return null;
       try {
