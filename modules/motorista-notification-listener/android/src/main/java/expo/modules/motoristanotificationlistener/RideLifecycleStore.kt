@@ -5,13 +5,13 @@ import org.json.JSONArray
 import org.json.JSONObject
 
 /**
- * Small native queue for conservative ride lifecycle signals.
- * It never stores passenger names or addresses. The queue is consumed by JS
- * when MotoristaPro is active again.
+ * Native storage for conservative ride lifecycle signals and the current
+ * per-platform state. It never stores passenger names or addresses.
  */
 object RideLifecycleStore {
   private const val PREFS = "motorista_ride_lifecycle"
   private const val KEY_QUEUE = "events"
+  private const val KEY_STATE_PREFIX = "state_"
   private const val MAX_ITEMS = 24
 
   @Synchronized
@@ -39,6 +39,28 @@ object RideLifecycleStore {
     context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
       .edit()
       .remove(KEY_QUEUE)
+      .apply()
+  }
+
+  @Synchronized
+  fun writePlatformState(context: Context, platform: String, state: JSONObject) {
+    context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+      .edit()
+      .putString(KEY_STATE_PREFIX + platform.lowercase(), state.toString())
+      .apply()
+  }
+
+  fun readPlatformState(context: Context, platform: String): JSONObject? {
+    val raw = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+      .getString(KEY_STATE_PREFIX + platform.lowercase(), null)
+      ?: return null
+    return try { JSONObject(raw) } catch (_: Exception) { null }
+  }
+
+  fun clearPlatformState(context: Context, platform: String) {
+    context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+      .edit()
+      .remove(KEY_STATE_PREFIX + platform.lowercase())
       .apply()
   }
 }
