@@ -151,15 +151,17 @@ internal class DiagnosticRateLimiter(private val repeatIntervalMs: Long) {
 
   private val lastEmittedByKey = LinkedHashMap<String, Long>()
 
+  @Synchronized
   fun shouldEmit(key: String, nowMs: Long): Boolean {
     val previousAt = lastEmittedByKey[key]
     val elapsed = if (previousAt != null && nowMs >= previousAt) nowMs - previousAt else Long.MAX_VALUE
     if (elapsed < repeatIntervalMs) return false
 
     lastEmittedByKey[key] = nowMs
-    if (lastEmittedByKey.size > 32) {
+    while (lastEmittedByKey.size > 32) {
       val oldest = lastEmittedByKey.minByOrNull { it.value }?.key
-      if (oldest != null && oldest != key) lastEmittedByKey.remove(oldest)
+      if (oldest == null) break
+      lastEmittedByKey.remove(oldest)
     }
     return true
   }

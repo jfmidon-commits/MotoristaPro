@@ -70,11 +70,22 @@ jobs:
           NODE_ENV: production
         run: ./gradlew assembleRelease --no-daemon
 
+      - name: Verify APK integrity, signature and package
+        run: |
+          apk="android/app/build/outputs/apk/release/app-release.apk"
+          unzip -tq "$apk"
+          build_tools_dir="$(find "$ANDROID_HOME/build-tools" -mindepth 1 -maxdepth 1 -type d | sort -V | tail -n 1)"
+          test -n "$build_tools_dir"
+          "$build_tools_dir/apksigner" verify --verbose "$apk"
+          "$build_tools_dir/aapt" dump badging "$apk" | tee MotoristaPro-apk-badging.txt
+          grep -Fq "package: name='com.motoristapro.app'" MotoristaPro-apk-badging.txt
+
       - name: Rename APK
         run: |
           short_sha="${GITHUB_SHA::7}"
           cp android/app/build/outputs/apk/release/app-release.apk "MotoristaPro-${short_sha}-test.apk"
           sha256sum "MotoristaPro-${short_sha}-test.apk" > "MotoristaPro-${short_sha}-test.apk.sha256"
+          printf 'commit=%s\nworkflow_run=%s\n' "$GITHUB_SHA" "$GITHUB_RUN_ID" > MotoristaPro-build.txt
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
@@ -83,5 +94,7 @@ jobs:
           path: |
             MotoristaPro-*-test.apk
             MotoristaPro-*-test.apk.sha256
+            MotoristaPro-apk-badging.txt
+            MotoristaPro-build.txt
           if-no-files-found: error
           retention-days: 14
