@@ -14,26 +14,13 @@ on:
       - "package.json"
       - ".env.example"
       - ".github/workflows/android-apk.yml"
-  pull_request:
-    branches:
-      - main
-    paths:
-      - "src/**"
-      - "modules/**"
-      - "App.tsx"
-      - "app.json"
-      - "package.json"
-      - ".env.example"
-      - ".github/workflows/android-apk.yml"
+
+concurrency:
+  group: android-apk-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   build-apk:
-    # Experimental branch is allowed on push so we spend exactly one build for the screenshot probe.
-    # Triggered after CI/native checks pass so the resulting artifact is suitable for device validation.
-    # Build marker: ride lifecycle/payment flow validated by CI/native checks before device test.
-    # Device-build trigger: lifecycle/payment candidate ready for end-to-end validation.
-    # Build refresh: 2026-09-03 lifecycle/payment candidate.
-    if: github.event_name != 'pull_request' || (github.head_ref != 'feature/ride-accessibility-capture' && github.head_ref != 'experiment/ride-accessibility-screenshot-ocr')
     runs-on: ubuntu-latest
     timeout-minutes: 45
 
@@ -78,12 +65,17 @@ jobs:
         run: ./gradlew assembleRelease --no-daemon
 
       - name: Rename APK
-        run: cp android/app/build/outputs/apk/release/app-release.apk MotoristaPro-test.apk
+        run: |
+          short_sha="${GITHUB_SHA::7}"
+          cp android/app/build/outputs/apk/release/app-release.apk "MotoristaPro-${short_sha}-test.apk"
+          sha256sum "MotoristaPro-${short_sha}-test.apk" > "MotoristaPro-${short_sha}-test.apk.sha256"
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: MotoristaPro-Android-test
-          path: MotoristaPro-test.apk
+          name: MotoristaPro-Android-${{ github.sha }}
+          path: |
+            MotoristaPro-*-test.apk
+            MotoristaPro-*-test.apk.sha256
           if-no-files-found: error
           retention-days: 14
