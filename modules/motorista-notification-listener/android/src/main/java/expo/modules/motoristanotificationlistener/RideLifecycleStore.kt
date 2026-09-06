@@ -61,6 +61,12 @@ object RideLifecycleStore {
   }
 
   @Synchronized
+  fun isPlatformRideActive(context: Context, platform: String): Boolean {
+    val state = readPlatformState(context, platform)?.optString("state", "") ?: return false
+    return state == "pickup" || state == "in_trip" || state == "in_progress"
+  }
+
+  @Synchronized
   fun clearPlatformState(context: Context, platform: String) {
     context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
       .edit()

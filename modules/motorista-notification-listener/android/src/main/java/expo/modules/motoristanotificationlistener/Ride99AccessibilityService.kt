@@ -33,6 +33,7 @@ class Ride99AccessibilityService : AccessibilityService() {
     private const val BACKGROUND_POLL_INTERVAL_MS = 5_000L
     private const val RETRY_DELAY_MS = 650L
     private const val MAX_RETRIES = 3
+    private const val MAX_ADMISSION_RETRIES = 8
     private const val DIAGNOSTIC_REPEAT_INTERVAL_MS = 30_000L
     private const val OVERLAY_VISIBLE_MS = 8_000L
     private const val OVERLAY_DEDUPE_MS = 20_000L
@@ -57,7 +58,8 @@ class Ride99AccessibilityService : AccessibilityService() {
     val signal: CaptureSignal,
     val source: String,
     val attempt: Int,
-    val chainId: Long
+    val chainId: Long,
+    val admissionAttempt: Int = 0
   )
   private data class OcrLine(val text: String, val bounds: Rect)
   private data class RouteLeg(val minutes: Int, val km: Double, val top: Int)
@@ -174,6 +176,10 @@ class Ride99AccessibilityService : AccessibilityService() {
 
   private fun attemptCapture(trigger: CaptureTrigger) {
     if (serviceDestroyed || trigger.chainId != retryGeneration) return
+    if (RideLifecycleStore.isPlatformRideActive(applicationContext, "99")) {
+      hideDecisionOverlay()
+      return
+    }
     if (!hasUsable99Window()) return
     if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
       persistStatus(trigger.signal, "OCR_99: UNSUPPORTED_API source=${trigger.source}")
@@ -182,7 +188,7 @@ class Ride99AccessibilityService : AccessibilityService() {
 
     val lease = ScreenshotCaptureCoordinator.tryAcquire("offer:99")
     if (lease == null) {
-      retryOrDefer(trigger, ScreenshotCaptureCoordinator.suggestedRetryDelayMs())
+      retryAfterContention(trigger)
       return
     }
     activeLease = lease
@@ -203,7 +209,11 @@ class Ride99AccessibilityService : AccessibilityService() {
     val runnable = Runnable {
       if (trigger.chainId != retryGeneration || serviceDestroyed) return@Runnable
       retryRunnable = null
-      attemptCapture(trigger.copy(source = "retry=${nextAttempt}/$MAX_RETRIES", attempt = nextAttempt))
+      attemptCapture(trigger.copy(
+        source = "retry=${nextAttempt}/$MAX_RETRIES",
+        attempt = nextAttempt,
+        admissionAttempt = 0
+      ))
     }
     retryRunnable = runnable
     retryHandler.postDelayed(runnable, delayMs.coerceAtLeast(150L))
@@ -218,6 +228,23 @@ class Ride99AccessibilityService : AccessibilityService() {
   private fun retryOrDefer(trigger: CaptureTrigger, delayMs: Long = RETRY_DELAY_MS) {
     if (trigger.attempt < MAX_RETRIES) scheduleRetry(trigger, delayMs)
     else deferAfterMiss()
+  }
+
+  private fun retryAfterContention(trigger: CaptureTrigger) {
+    if (trigger.chainId != retryGeneration) return
+    if (trigger.admissionAttempt >= MAX_ADMISSION_RETRIES) {
+      deferAfterMiss()
+      return
+    }
+
+    retryRunnable?.let { retryHandler.removeCallbacks(it) }
+    val runnable = Runnable {
+      if (trigger.chainId != retryGeneration || serviceDestroyed) return@Runnable
+      retryRunnable = null
+      attemptCapture(trigger.copy(admissionAttempt = trigger.admissionAttempt + 1))
+    }
+    retryRunnable = runnable
+    retryHandler.postDelayed(runnable, ScreenshotCaptureCoordinator.suggestedRetryDelayMs())
   }
 
   private fun deferAfterMiss() {
@@ -247,6 +274,9 @@ class Ride99AccessibilityService : AccessibilityService() {
 
   private fun nextForegroundPollDelay(): Long {
     if (!hasUsable99Window()) return BACKGROUND_POLL_INTERVAL_MS
+    if (RideLifecycleStore.isPlatformRideActive(applicationContext, "99")) {
+      return BACKGROUND_POLL_INTERVAL_MS
+    }
     val remaining = nextCaptureAtElapsed - SystemClock.elapsedRealtime()
     if (remaining > 0L) return remaining
     if (retryRunnable != null || hasActiveCapture()) return 500L

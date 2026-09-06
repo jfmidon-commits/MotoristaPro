@@ -46,6 +46,7 @@ class RideAccessibilityService : AccessibilityService() {
     private const val MAX_OCR_LINES = 64
     private const val MAX_LINE_CHARS = 220
     private const val DIAGNOSTIC_REPEAT_INTERVAL_MS = 30_000L
+    private const val MAX_ADMISSION_RETRIES = 8
     private const val OVERLAY_STALE_MS = 2_500L
     private const val OVERLAY_DEDUPE_MS = 20_000L
     private const val NO_OFFER_SEQUENCES_TO_HIDE = 2
@@ -120,7 +121,8 @@ class RideAccessibilityService : AccessibilityService() {
     val eventType: Int,
     val windowId: Int,
     val attempt: Int,
-    val chainId: Long
+    val chainId: Long,
+    val admissionAttempt: Int = 0
   )
 
   private data class OcrLineRecord(val text: String, val bounds: Rect)
@@ -243,7 +245,7 @@ class RideAccessibilityService : AccessibilityService() {
     val runnable = Runnable {
       if (trigger.chainId != retryGeneration) return@Runnable
       retryRunnable = null
-      attemptCapture(trigger.copy(attempt = nextAttempt))
+      attemptCapture(trigger.copy(attempt = nextAttempt, admissionAttempt = 0))
     }
     retryRunnable = runnable
     retryHandler.postDelayed(runnable, delay.coerceAtLeast(120L))
@@ -251,6 +253,10 @@ class RideAccessibilityService : AccessibilityService() {
 
   private fun attemptCapture(trigger: CaptureTrigger) {
     if (serviceDestroyed || trigger.chainId != retryGeneration) return
+    if (RideLifecycleStore.isPlatformRideActive(applicationContext, "uber")) {
+      hideDecisionOverlay()
+      return
+    }
 
     val uberWindow = findBestUberWindow()
     if (!isOfferSizedUberWindow(uberWindow)) {
@@ -270,7 +276,7 @@ class RideAccessibilityService : AccessibilityService() {
 
     val lease = ScreenshotCaptureCoordinator.tryAcquire("offer:uber")
     if (lease == null) {
-      retryOrDefer(trigger, ScreenshotCaptureCoordinator.suggestedRetryDelayMs())
+      retryAfterContention(trigger)
       return
     }
     activeLease = lease
@@ -473,6 +479,23 @@ class RideAccessibilityService : AccessibilityService() {
   private fun retryOrDefer(trigger: CaptureTrigger, delayMs: Long? = null) {
     if (trigger.attempt < RETRY_DELAYS_MS.size) scheduleRetry(trigger, delayMs)
     else deferAfterMiss()
+  }
+
+  private fun retryAfterContention(trigger: CaptureTrigger) {
+    if (trigger.chainId != retryGeneration) return
+    if (trigger.admissionAttempt >= MAX_ADMISSION_RETRIES) {
+      deferAfterMiss()
+      return
+    }
+
+    retryRunnable?.let { retryHandler.removeCallbacks(it) }
+    val runnable = Runnable {
+      if (trigger.chainId != retryGeneration || serviceDestroyed) return@Runnable
+      retryRunnable = null
+      attemptCapture(trigger.copy(admissionAttempt = trigger.admissionAttempt + 1))
+    }
+    retryRunnable = runnable
+    retryHandler.postDelayed(runnable, ScreenshotCaptureCoordinator.suggestedRetryDelayMs())
   }
 
   private fun finishLease(lease: CaptureLease) {
