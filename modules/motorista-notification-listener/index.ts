@@ -47,7 +47,21 @@ export interface AccessibilitySnapshot {
   origins?: string[];
 }
 
-export type RideLifecycleNativeState = "offer" | "in_progress" | "ended" | "payment_confirmed" | "stale_reset";
+export interface AccessibilityServicesStatus {
+  uberCapture: boolean;
+  capture99: boolean;
+  lifecycle: boolean;
+}
+
+export type RideLifecycleNativeState =
+  | "offer"
+  | "pickup"
+  | "in_trip"
+  | "in_progress"
+  | "ended"
+  | "payment_confirmed"
+  | "offer_timeout"
+  | "stale_reset";
 export type RideLifecycleNativePaymentMethod = "cash" | "pix" | "app";
 
 export interface RideLifecycleNativeEvent {
@@ -64,6 +78,7 @@ type NativeModuleShape = {
   clearPendingNotifications(): boolean;
   getAccessibilityPermissionStatus(): NativeNotificationPermissionStatus;
   getRideLifecyclePermissionStatus(): NativeNotificationPermissionStatus;
+  getAccessibilityServicesStatusJson(): string;
   openAccessibilitySettings(): boolean;
   getPendingAccessibilitySnapshotsJson(): string;
   clearPendingAccessibilitySnapshots(): boolean;
@@ -101,6 +116,20 @@ export function getAccessibilityAccessStatus(): NativeNotificationPermissionStat
 
 export function getRideLifecycleAccessStatus(): NativeNotificationPermissionStatus {
   return NativeModule?.getRideLifecyclePermissionStatus() ?? "unavailable";
+}
+
+export function getAccessibilityServicesStatus(): AccessibilityServicesStatus {
+  if (!NativeModule) return { uberCapture: false, capture99: false, lifecycle: false };
+  try {
+    const parsed = JSON.parse(NativeModule.getAccessibilityServicesStatusJson());
+    return {
+      uberCapture: parsed?.uberCapture === true,
+      capture99: parsed?.capture99 === true,
+      lifecycle: parsed?.lifecycle === true
+    };
+  } catch {
+    return { uberCapture: false, capture99: false, lifecycle: false };
+  }
 }
 
 export function openAccessibilitySettings(): boolean {
