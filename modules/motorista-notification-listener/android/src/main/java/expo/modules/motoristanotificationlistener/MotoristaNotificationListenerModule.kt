@@ -1,12 +1,11 @@
 package expo.modules.motoristanotificationlistener
 
-import android.accessibilityservice.AccessibilityServiceInfo
 import android.content.Context
 import android.content.Intent
 import android.provider.Settings
-import android.view.accessibility.AccessibilityManager
 import expo.modules.kotlin.modules.Module
 import expo.modules.kotlin.modules.ModuleDefinition
+import org.json.JSONObject
 
 class MotoristaNotificationListenerModule : Module() {
   override fun definition() = ModuleDefinition {
@@ -15,7 +14,7 @@ class MotoristaNotificationListenerModule : Module() {
     Function("getPermissionStatus") {
       val context = appContext.reactContext ?: return@Function "unavailable"
       val enabled = Settings.Secure.getString(context.contentResolver, "enabled_notification_listeners") ?: ""
-      if (enabled.contains(context.packageName)) "granted" else "denied"
+      if (enabled.contains(context.packageName, ignoreCase = true)) "granted" else "denied"
     }
 
     Function("openNotificationAccessSettings") {
@@ -40,14 +39,24 @@ class MotoristaNotificationListenerModule : Module() {
 
     Function("getAccessibilityPermissionStatus") {
       val context = appContext.reactContext ?: return@Function "unavailable"
-      val captureEnabled = isAccessibilityServiceEnabled(context, "RideAccessibilityService")
+      val uberCaptureEnabled = isAccessibilityServiceEnabled(context, "RideAccessibilityService")
+      val capture99Enabled = isAccessibilityServiceEnabled(context, "Ride99AccessibilityService")
       val lifecycleEnabled = isAccessibilityServiceEnabled(context, "RideLifecycleAccessibilityService")
-      if (captureEnabled && lifecycleEnabled) "granted" else "denied"
+      if ((uberCaptureEnabled || capture99Enabled) && lifecycleEnabled) "granted" else "denied"
     }
 
     Function("getRideLifecyclePermissionStatus") {
       val context = appContext.reactContext ?: return@Function "unavailable"
       if (isAccessibilityServiceEnabled(context, "RideLifecycleAccessibilityService")) "granted" else "denied"
+    }
+
+    Function("getAccessibilityServicesStatusJson") {
+      val context = appContext.reactContext ?: return@Function "{}"
+      JSONObject().apply {
+        put("uberCapture", isAccessibilityServiceEnabled(context, "RideAccessibilityService"))
+        put("capture99", isAccessibilityServiceEnabled(context, "Ride99AccessibilityService"))
+        put("lifecycle", isAccessibilityServiceEnabled(context, "RideLifecycleAccessibilityService"))
+      }.toString()
     }
 
     Function("openAccessibilitySettings") {
@@ -83,13 +92,20 @@ class MotoristaNotificationListenerModule : Module() {
   }
 
   private fun isAccessibilityServiceEnabled(context: Context, serviceSuffix: String): Boolean {
-    val am = context.getSystemService(Context.ACCESSIBILITY_SERVICE) as? AccessibilityManager
-      ?: return false
-    val enabled = am.getEnabledAccessibilityServiceList(AccessibilityServiceInfo.FEEDBACK_GENERIC)
-      ?: return false
-    return enabled.any { info ->
-      val id = info.id ?: return@any false
-      id.contains(context.packageName) && id.endsWith(serviceSuffix)
-    }
+    val enabled = Settings.Secure.getString(
+      context.contentResolver,
+      Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES
+    ) ?: return false
+
+    val packageName = context.packageName.lowercase()
+    val suffix = serviceSuffix.lowercase()
+    return enabled
+      .split(':')
+      .asSequence()
+      .map { it.trim().lowercase() }
+      .filter { it.isNotEmpty() }
+      .any { component ->
+        component.contains(packageName) && component.endsWith(suffix)
+      }
   }
 }
