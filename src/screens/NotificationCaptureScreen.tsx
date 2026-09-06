@@ -7,6 +7,7 @@ import {
   clearPendingRideNotifications,
   getAccessibilityAccessStatus,
   getAccessibilityServicesStatus,
+  getCaptureRuntimeHealth,
   getNotificationAccessStatus,
   getPendingAccessibilitySnapshots,
   getPendingRideNotifications,
@@ -14,6 +15,7 @@ import {
   openNotificationAccessSettings,
   type AccessibilitySnapshot,
   type AccessibilityServicesStatus,
+  type CaptureRuntimeHealth,
   type CapturedRideNotification,
   type NativeNotificationPermissionStatus
 } from "../../modules/motorista-notification-listener";
@@ -133,6 +135,16 @@ export default function NotificationCaptureScreen() {
     capture99: false,
     lifecycle: false
   });
+  const [captureHealth, setCaptureHealth] = useState<CaptureRuntimeHealth>({
+    busy: false,
+    activeOwner: null,
+    activeAgeMs: 0,
+    grants: 0,
+    rejections: 0,
+    staleRecoveries: 0,
+    leaseTimeoutMs: 0,
+    minStartIntervalMs: 0
+  });
   const [notifications, setNotifications] = useState<CapturedRideNotification[]>([]);
   const [snapshots, setSnapshots] = useState<AccessibilitySnapshot[]>([]);
   const [refreshing, setRefreshing] = useState(false);
@@ -142,6 +154,7 @@ export default function NotificationCaptureScreen() {
     setStatus(getNotificationAccessStatus());
     setA11yStatus(getAccessibilityAccessStatus());
     setA11yServices(getAccessibilityServicesStatus());
+    setCaptureHealth(getCaptureRuntimeHealth());
     setNotifications(getPendingRideNotifications());
     setSnapshots(getPendingAccessibilitySnapshots());
     setLastUpdatedAt(Date.now());
@@ -217,6 +230,9 @@ export default function NotificationCaptureScreen() {
             </Text>
           ) : null}
           <Text style={styles.statusText}>{snapshots.length} snapshot(s) sanitizado(s) na fila local.</Text>
+          <Text style={styles.statusText}>
+            Sessão: {captureHealth.grants} captura(s) iniciada(s) • {captureHealth.rejections} disputa(s) evitada(s) • {captureHealth.staleRecoveries} recuperação(ões) automática(s)
+          </Text>
           <Text style={styles.statusText}>Última leitura da tela: {formatCapturedAt(lastUpdatedAt)}</Text>
         </View>
 

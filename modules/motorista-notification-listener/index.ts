@@ -53,6 +53,17 @@ export interface AccessibilityServicesStatus {
   lifecycle: boolean;
 }
 
+export interface CaptureRuntimeHealth {
+  busy: boolean;
+  activeOwner: string | null;
+  activeAgeMs: number;
+  grants: number;
+  rejections: number;
+  staleRecoveries: number;
+  leaseTimeoutMs: number;
+  minStartIntervalMs: number;
+}
+
 export type RideLifecycleNativeState =
   | "offer"
   | "pickup"
@@ -79,6 +90,7 @@ type NativeModuleShape = {
   getAccessibilityPermissionStatus(): NativeNotificationPermissionStatus;
   getRideLifecyclePermissionStatus(): NativeNotificationPermissionStatus;
   getAccessibilityServicesStatusJson(): string;
+  getCaptureRuntimeHealthJson(): string;
   openAccessibilitySettings(): boolean;
   getPendingAccessibilitySnapshotsJson(): string;
   clearPendingAccessibilitySnapshots(): boolean;
@@ -129,6 +141,37 @@ export function getAccessibilityServicesStatus(): AccessibilityServicesStatus {
     };
   } catch {
     return { uberCapture: false, capture99: false, lifecycle: false };
+  }
+}
+
+export function getCaptureRuntimeHealth(): CaptureRuntimeHealth {
+  const empty: CaptureRuntimeHealth = {
+    busy: false,
+    activeOwner: null,
+    activeAgeMs: 0,
+    grants: 0,
+    rejections: 0,
+    staleRecoveries: 0,
+    leaseTimeoutMs: 0,
+    minStartIntervalMs: 0
+  };
+  if (!NativeModule) return empty;
+  try {
+    const parsed = JSON.parse(NativeModule.getCaptureRuntimeHealthJson());
+    const numberOrZero = (value: unknown): number =>
+      typeof value === "number" && Number.isFinite(value) ? value : 0;
+    return {
+      busy: parsed?.busy === true,
+      activeOwner: typeof parsed?.activeOwner === "string" ? parsed.activeOwner : null,
+      activeAgeMs: numberOrZero(parsed?.activeAgeMs),
+      grants: numberOrZero(parsed?.grants),
+      rejections: numberOrZero(parsed?.rejections),
+      staleRecoveries: numberOrZero(parsed?.staleRecoveries),
+      leaseTimeoutMs: numberOrZero(parsed?.leaseTimeoutMs),
+      minStartIntervalMs: numberOrZero(parsed?.minStartIntervalMs)
+    };
+  } catch {
+    return empty;
   }
 }
 

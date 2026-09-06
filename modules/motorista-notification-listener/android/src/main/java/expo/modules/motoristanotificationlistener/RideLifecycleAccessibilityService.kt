@@ -8,6 +8,7 @@ import android.graphics.drawable.GradientDrawable
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import android.view.Display
 import android.view.Gravity
 import android.view.View
@@ -22,7 +23,6 @@ import com.google.mlkit.vision.text.latin.TextRecognizerOptions
 import org.json.JSONArray
 import org.json.JSONObject
 import java.util.Locale
-import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * Conservative ride lifecycle detector for Uber/99.
@@ -44,6 +44,10 @@ class RideLifecycleAccessibilityService : AccessibilityService() {
     private const val RECENT_CAPTURED_OFFER_MS = 120_000L
     private const val POLL_INTERVAL_MS = 4_000L
     private const val MIN_HOME_END_MS = 60_000L
+    private const val TREE_SCAN_MIN_INTERVAL_MS = 350L
+    private const val OFFER_OCR_INTERVAL_MS = 4_000L
+    private const val PICKUP_OCR_INTERVAL_MS = 6_000L
+    private const val IN_TRIP_OCR_INTERVAL_MS = 12_000L
 
     private val OFFER_MARKERS = listOf(
       "aceitar", "selecionar", "exclusivo", "priority", "prioritário", "negocia"
@@ -95,7 +99,10 @@ class RideLifecycleAccessibilityService : AccessibilityService() {
     APP99_PACKAGE to PlatformState()
   )
   private val handler = Handler(Looper.getMainLooper())
-  private val screenshotInFlight = AtomicBoolean(false)
+  private val lastTreeScanAtElapsed = mutableMapOf<String, Long>()
+  private val lastOcrAtElapsed = mutableMapOf<String, Long>()
+  private var activeLease: CaptureLease? = null
+  private var serviceDestroyed = false
   private var paymentOverlay: View? = null
   private var pollScheduled = false
 
@@ -105,6 +112,7 @@ class RideLifecycleAccessibilityService : AccessibilityService() {
 
   override fun onServiceConnected() {
     super.onServiceConnected()
+    serviceDestroyed = false
     restoreState(UBER_PACKAGE)
     restoreState(APP99_PACKAGE)
     schedulePollIfNeeded()
@@ -119,6 +127,20 @@ class RideLifecycleAccessibilityService : AccessibilityService() {
     val state = states[pkg] ?: return
     if (state.lastOfferAt == 0L) recoverRecentOffer(pkg, state, now)
 
+    val elapsed = SystemClock.elapsedRealtime()
+    val strongSignal = event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED ||
+      event.eventType == AccessibilityEvent.TYPE_WINDOWS_CHANGED
+    val previousTreeScan = lastTreeScanAtElapsed[pkg] ?: 0L
+    if (
+      !strongSignal &&
+      elapsed >= previousTreeScan &&
+      elapsed - previousTreeScan < TREE_SCAN_MIN_INTERVAL_MS
+    ) {
+      if (isActiveState(state.state)) schedulePollIfNeeded()
+      return
+    }
+    lastTreeScanAtElapsed[pkg] = elapsed
+
     val text = collectActiveWindowTextFor(pkg)
     if (text.isNotBlank()) evaluateText(pkg, state, text, now, "tree")
     if (isActiveState(state.state)) schedulePollIfNeeded()
@@ -127,8 +149,11 @@ class RideLifecycleAccessibilityService : AccessibilityService() {
   override fun onInterrupt() {}
 
   override fun onDestroy() {
+    serviceDestroyed = true
     hidePaymentPrompt()
     handler.removeCallbacksAndMessages(null)
+    activeLease?.let(ScreenshotCaptureCoordinator::release)
+    activeLease = null
     try { recognizer.close() } catch (_: Exception) {}
     super.onDestroy()
   }
@@ -308,8 +333,22 @@ class RideLifecycleAccessibilityService : AccessibilityService() {
   }
 
   private fun requestLifecycleScreenshot(pkg: String) {
-    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return
-    if (!screenshotInFlight.compareAndSet(false, true)) return
+    if (serviceDestroyed || Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return
+    val state = states[pkg] ?: return
+    if (!isActiveState(state.state) || !isPackageVisible(pkg)) return
+
+    val interval = when (state.state) {
+      "offer" -> OFFER_OCR_INTERVAL_MS
+      "pickup" -> PICKUP_OCR_INTERVAL_MS
+      else -> IN_TRIP_OCR_INTERVAL_MS
+    }
+    val elapsed = SystemClock.elapsedRealtime()
+    val previous = lastOcrAtElapsed[pkg]
+    if (previous != null && elapsed >= previous && elapsed - previous < interval) return
+
+    val lease = ScreenshotCaptureCoordinator.tryAcquire("lifecycle:${platformKey(pkg)}") ?: return
+    activeLease = lease
+    lastOcrAtElapsed[pkg] = elapsed
 
     try {
       takeScreenshot(
@@ -325,26 +364,37 @@ class RideLifecycleAccessibilityService : AccessibilityService() {
               softwareBitmap = hardwareBitmap?.copy(Bitmap.Config.ARGB_8888, false)
               val bitmap = softwareBitmap
               if (bitmap == null) {
-                screenshotInFlight.set(false)
+                finishLease(lease)
+                return
+              }
+              if (serviceDestroyed || !ScreenshotCaptureCoordinator.isActive(lease)) {
+                try { bitmap.recycle() } catch (_: Exception) {}
+                finishLease(lease)
                 return
               }
               recognizer.process(InputImage.fromBitmap(bitmap, 0))
                 .addOnSuccessListener { result ->
                   try {
-                    val state = states[pkg] ?: return@addOnSuccessListener
-                    evaluateText(pkg, state, result.text, System.currentTimeMillis(), "ocr")
+                    if (serviceDestroyed || !ScreenshotCaptureCoordinator.isActive(lease)) {
+                      return@addOnSuccessListener
+                    }
+                    val currentState = states[pkg] ?: return@addOnSuccessListener
+                    if (!isActiveState(currentState.state) || !isPackageVisible(pkg)) {
+                      return@addOnSuccessListener
+                    }
+                    evaluateText(pkg, currentState, result.text, System.currentTimeMillis(), "ocr")
                   } finally {
                     try { bitmap.recycle() } catch (_: Exception) {}
-                    screenshotInFlight.set(false)
+                    finishLease(lease)
                   }
                 }
                 .addOnFailureListener {
                   try { bitmap.recycle() } catch (_: Exception) {}
-                  screenshotInFlight.set(false)
+                  finishLease(lease)
                 }
             } catch (_: Exception) {
               try { softwareBitmap?.recycle() } catch (_: Exception) {}
-              screenshotInFlight.set(false)
+              finishLease(lease)
             } finally {
               try { hardwareBitmap?.recycle() } catch (_: Exception) {}
               try { buffer.close() } catch (_: Exception) {}
@@ -352,13 +402,18 @@ class RideLifecycleAccessibilityService : AccessibilityService() {
           }
 
           override fun onFailure(errorCode: Int) {
-            screenshotInFlight.set(false)
+            finishLease(lease)
           }
         }
       )
     } catch (_: Exception) {
-      screenshotInFlight.set(false)
+      finishLease(lease)
     }
+  }
+
+  private fun finishLease(lease: CaptureLease) {
+    ScreenshotCaptureCoordinator.release(lease)
+    if (activeLease?.token == lease.token) activeLease = null
   }
 
   private fun recoverRecentOffer(pkg: String, state: PlatformState, now: Long) {

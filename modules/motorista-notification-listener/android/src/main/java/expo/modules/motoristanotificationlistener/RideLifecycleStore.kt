@@ -30,11 +30,13 @@ object RideLifecycleStore {
     prefs.edit().putString(KEY_QUEUE, next.toString()).apply()
   }
 
+  @Synchronized
   fun read(context: Context): String {
     return context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
       .getString(KEY_QUEUE, "[]") ?: "[]"
   }
 
+  @Synchronized
   fun clear(context: Context) {
     context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
       .edit()
@@ -50,6 +52,7 @@ object RideLifecycleStore {
       .apply()
   }
 
+  @Synchronized
   fun readPlatformState(context: Context, platform: String): JSONObject? {
     val raw = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
       .getString(KEY_STATE_PREFIX + platform.lowercase(), null)
@@ -57,6 +60,7 @@ object RideLifecycleStore {
     return try { JSONObject(raw) } catch (_: Exception) { null }
   }
 
+  @Synchronized
   fun clearPlatformState(context: Context, platform: String) {
     context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
       .edit()

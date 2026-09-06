@@ -9,6 +9,7 @@ import android.graphics.drawable.GradientDrawable
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import android.view.Display
 import android.view.Gravity
 import android.view.View
@@ -23,17 +24,16 @@ import com.google.mlkit.vision.text.latin.TextRecognizerOptions
 import org.json.JSONArray
 import org.json.JSONObject
 import java.util.Locale
-import java.util.concurrent.atomic.AtomicBoolean
-import java.util.concurrent.atomic.AtomicLong
 import kotlin.math.abs
+import kotlin.math.max
 
 class Ride99AccessibilityService : AccessibilityService() {
   companion object {
     private const val PACKAGE_99 = "com.app99.driver"
-    private const val MIN_CAPTURE_INTERVAL_MS = 550L
-    private const val FOREGROUND_POLL_INTERVAL_MS = 800L
+    private const val BACKGROUND_POLL_INTERVAL_MS = 5_000L
     private const val RETRY_DELAY_MS = 650L
     private const val MAX_RETRIES = 3
+    private const val DIAGNOSTIC_REPEAT_INTERVAL_MS = 30_000L
     private const val OVERLAY_VISIBLE_MS = 8_000L
     private const val OVERLAY_DEDUPE_MS = 20_000L
     private const val MAX_OCR_LINES = 48
@@ -42,6 +42,7 @@ class Ride99AccessibilityService : AccessibilityService() {
     private const val YELLOW_PER_KM = 1.70
     private const val GREEN_PER_HOUR = 46.0
     private const val YELLOW_PER_HOUR = 35.0
+    private val IDLE_BACKOFF_MS = longArrayOf(1_200L, 2_500L, 4_500L, 8_000L)
     private val MONEY_TOKEN_REGEX = Regex("""(?:R\$|RS|R5)\s*([0-9]{1,5}(?:[.,][0-9]{1,2})?)""", RegexOption.IGNORE_CASE)
     private val KM_REGEX = Regex("""([0-9]{1,3}(?:[.,][0-9]+)?)\s*km\b""", RegexOption.IGNORE_CASE)
     private val METER_REGEX = Regex("""([0-9]{1,4})\s*m\b""", RegexOption.IGNORE_CASE)
@@ -52,17 +53,26 @@ class Ride99AccessibilityService : AccessibilityService() {
   }
 
   private data class CaptureSignal(val eventType: Int, val windowId: Int)
+  private data class CaptureTrigger(
+    val signal: CaptureSignal,
+    val source: String,
+    val attempt: Int,
+    val chainId: Long
+  )
   private data class OcrLine(val text: String, val bounds: Rect)
   private data class RouteLeg(val minutes: Int, val km: Double, val top: Int)
   private data class Decision(val fare: Double, val totalKm: Double, val totalMinutes: Int, val reaisPerKm: Double, val reaisPerHour: Double, val semaphore: String, val hasStops: Boolean, val signature: String)
 
-  private val lastCaptureAt = AtomicLong(0L)
-  private val captureInFlight = AtomicBoolean(false)
   private val overlayHandler = Handler(Looper.getMainLooper())
   private val foregroundPollHandler = Handler(Looper.getMainLooper())
   private val retryHandler = Handler(Looper.getMainLooper())
+  private val idleBackoff = AdaptivePollingPolicy(IDLE_BACKOFF_MS)
+  private val diagnosticLimiter = DiagnosticRateLimiter(DIAGNOSTIC_REPEAT_INTERVAL_MS)
   private var retryRunnable: Runnable? = null
-  private var retryAttempt = 0
+  private var retryGeneration = 0L
+  private var nextCaptureAtElapsed = 0L
+  private var activeLease: CaptureLease? = null
+  private var serviceDestroyed = false
   private var overlayView: View? = null
   private var overlayHideRunnable: Runnable? = null
   private var lastOverlaySignature: String? = null
@@ -73,16 +83,28 @@ class Ride99AccessibilityService : AccessibilityService() {
   private val foregroundPollRunnable = object : Runnable {
     override fun run() {
       try {
-        if (hasUsable99Window()) requestCapture(lastSignal, "poll")
+        if (serviceDestroyed) return
+        val visible = hasUsable99Window()
+        val now = SystemClock.elapsedRealtime()
+        if (
+          visible &&
+          now >= nextCaptureAtElapsed &&
+          retryRunnable == null &&
+          !hasActiveCapture()
+        ) {
+          val chainId = beginRetryChain()
+          attemptCapture(CaptureTrigger(lastSignal, "poll", 0, chainId))
+        }
       } catch (_: Exception) {
       } finally {
-        foregroundPollHandler.postDelayed(this, FOREGROUND_POLL_INTERVAL_MS)
+        if (!serviceDestroyed) scheduleForegroundPoll(nextForegroundPollDelay())
       }
     }
   }
 
   override fun onServiceConnected() {
     super.onServiceConnected()
+    serviceDestroyed = false
     foregroundPollHandler.removeCallbacks(foregroundPollRunnable)
     foregroundPollHandler.post(foregroundPollRunnable)
   }
@@ -91,24 +113,45 @@ class Ride99AccessibilityService : AccessibilityService() {
     if (event == null || !isRelevantEventType(event.eventType)) return
     if (event.packageName?.toString()?.lowercase() != PACKAGE_99) return
     lastSignal = CaptureSignal(event.eventType, event.windowId)
-    retryAttempt = 0
-    requestCapture(lastSignal, "event")
+    val now = SystemClock.elapsedRealtime()
+    val strongSignal = event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED ||
+      event.eventType == AccessibilityEvent.TYPE_WINDOWS_CHANGED
+    if (strongSignal) {
+      idleBackoff.onStrongSignal()
+      nextCaptureAtElapsed = 0L
+    } else if (now < nextCaptureAtElapsed) {
+      return
+    }
+    if (hasActiveCapture()) return
+
+    val chainId = beginRetryChain()
+    attemptCapture(CaptureTrigger(lastSignal, "event", 0, chainId))
   }
 
   override fun onInterrupt() {
-    cancelRetry()
+    cancelRetryChain()
   }
 
   override fun onDestroy() {
+    serviceDestroyed = true
     foregroundPollHandler.removeCallbacks(foregroundPollRunnable)
-    cancelRetry()
+    cancelRetryChain()
     hideDecisionOverlay()
+    activeLease?.let(ScreenshotCaptureCoordinator::release)
+    activeLease = null
     try { recognizer.close() } catch (_: Exception) {}
     super.onDestroy()
   }
 
   private fun hasUsable99Window(): Boolean {
-    val activePackage = try { rootInActiveWindow?.packageName?.toString()?.lowercase() } catch (_: Exception) { null }
+    val activeRoot = try { rootInActiveWindow } catch (_: Exception) { null }
+    val activePackage = try {
+      activeRoot?.packageName?.toString()?.lowercase()
+    } catch (_: Exception) {
+      null
+    } finally {
+      try { activeRoot?.recycle() } catch (_: Exception) {}
+    }
     if (activePackage == PACKAGE_99) return true
     val screenArea = resources.displayMetrics.widthPixels.toLong() * resources.displayMetrics.heightPixels.toLong()
     return try {
@@ -129,43 +172,85 @@ class Ride99AccessibilityService : AccessibilityService() {
     }
   }
 
-  private fun requestCapture(signal: CaptureSignal, source: String) {
+  private fun attemptCapture(trigger: CaptureTrigger) {
+    if (serviceDestroyed || trigger.chainId != retryGeneration) return
     if (!hasUsable99Window()) return
     if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
-      persistStatus(signal, "OCR_99: UNSUPPORTED_API source=$source")
+      persistStatus(trigger.signal, "OCR_99: UNSUPPORTED_API source=${trigger.source}")
       return
     }
 
-    val now = System.currentTimeMillis()
-    val elapsed = now - lastCaptureAt.get()
-    if (elapsed < MIN_CAPTURE_INTERVAL_MS) {
-      scheduleRetry((MIN_CAPTURE_INTERVAL_MS - elapsed + 80L).coerceAtLeast(150L))
+    val lease = ScreenshotCaptureCoordinator.tryAcquire("offer:99")
+    if (lease == null) {
+      retryOrDefer(trigger, ScreenshotCaptureCoordinator.suggestedRetryDelayMs())
       return
     }
-    if (!captureInFlight.compareAndSet(false, true)) {
-      scheduleRetry(RETRY_DELAY_MS)
-      return
-    }
-    lastCaptureAt.set(now)
-    takeDisplayScreenshot(signal)
+    activeLease = lease
+    takeDisplayScreenshot(trigger, lease)
   }
 
-  private fun scheduleRetry(delayMs: Long = RETRY_DELAY_MS) {
-    if (retryAttempt >= MAX_RETRIES) return
-    retryRunnable?.let { retryHandler.removeCallbacks(it) }
-    retryAttempt += 1
-    val runnable = Runnable {
-      retryRunnable = null
-      requestCapture(lastSignal, "retry=$retryAttempt/$MAX_RETRIES")
-    }
-    retryRunnable = runnable
-    retryHandler.postDelayed(runnable, delayMs)
-  }
-
-  private fun cancelRetry() {
+  private fun beginRetryChain(): Long {
     retryRunnable?.let { retryHandler.removeCallbacks(it) }
     retryRunnable = null
-    retryAttempt = 0
+    retryGeneration += 1L
+    return retryGeneration
+  }
+
+  private fun scheduleRetry(trigger: CaptureTrigger, delayMs: Long = RETRY_DELAY_MS) {
+    if (trigger.chainId != retryGeneration || trigger.attempt >= MAX_RETRIES) return
+    retryRunnable?.let { retryHandler.removeCallbacks(it) }
+    val nextAttempt = trigger.attempt + 1
+    val runnable = Runnable {
+      if (trigger.chainId != retryGeneration || serviceDestroyed) return@Runnable
+      retryRunnable = null
+      attemptCapture(trigger.copy(source = "retry=${nextAttempt}/$MAX_RETRIES", attempt = nextAttempt))
+    }
+    retryRunnable = runnable
+    retryHandler.postDelayed(runnable, delayMs.coerceAtLeast(150L))
+  }
+
+  private fun cancelRetryChain() {
+    retryRunnable?.let { retryHandler.removeCallbacks(it) }
+    retryRunnable = null
+    retryGeneration += 1L
+  }
+
+  private fun retryOrDefer(trigger: CaptureTrigger, delayMs: Long = RETRY_DELAY_MS) {
+    if (trigger.attempt < MAX_RETRIES) scheduleRetry(trigger, delayMs)
+    else deferAfterMiss()
+  }
+
+  private fun deferAfterMiss() {
+    val delay = idleBackoff.onMiss()
+    nextCaptureAtElapsed = SystemClock.elapsedRealtime() + delay
+    scheduleForegroundPoll(delay)
+  }
+
+  private fun hasActiveCapture(): Boolean {
+    val lease = activeLease ?: return false
+    if (ScreenshotCaptureCoordinator.isActive(lease)) return true
+    activeLease = null
+    return false
+  }
+
+  private fun finishLease(lease: CaptureLease) {
+    ScreenshotCaptureCoordinator.release(lease)
+    if (activeLease?.token == lease.token) activeLease = null
+  }
+
+  private fun scheduleForegroundPoll(delayMs: Long) {
+    foregroundPollHandler.removeCallbacks(foregroundPollRunnable)
+    if (!serviceDestroyed) {
+      foregroundPollHandler.postDelayed(foregroundPollRunnable, delayMs.coerceAtLeast(250L))
+    }
+  }
+
+  private fun nextForegroundPollDelay(): Long {
+    if (!hasUsable99Window()) return BACKGROUND_POLL_INTERVAL_MS
+    val remaining = nextCaptureAtElapsed - SystemClock.elapsedRealtime()
+    if (remaining > 0L) return remaining
+    if (retryRunnable != null || hasActiveCapture()) return 500L
+    return max(500L, idleBackoff.currentDelayMs())
   }
 
   private fun isRelevantEventType(t: Int) =
@@ -173,7 +258,7 @@ class Ride99AccessibilityService : AccessibilityService() {
       t == AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED ||
       t == AccessibilityEvent.TYPE_WINDOWS_CHANGED
 
-  private fun takeDisplayScreenshot(signal: CaptureSignal) {
+  private fun takeDisplayScreenshot(trigger: CaptureTrigger, lease: CaptureLease) {
     try {
       takeScreenshot(Display.DEFAULT_DISPLAY, mainExecutor, object : TakeScreenshotCallback {
         override fun onSuccess(screenshot: ScreenshotResult) {
@@ -183,24 +268,24 @@ class Ride99AccessibilityService : AccessibilityService() {
           try {
             hb = Bitmap.wrapHardwareBuffer(buffer, screenshot.colorSpace)
             if (hb == null) {
-              persistStatus(signal, "OCR_99: BITMAP_WRAP_FAILED")
-              captureInFlight.set(false)
-              scheduleRetry()
+              persistStatus(trigger.signal, "OCR_99: BITMAP_WRAP_FAILED")
+              finishLease(lease)
+              retryOrDefer(trigger)
               return
             }
             sb = hb.copy(Bitmap.Config.ARGB_8888, false)
             if (sb == null) {
-              persistStatus(signal, "OCR_99: BITMAP_COPY_FAILED")
-              captureInFlight.set(false)
-              scheduleRetry()
+              persistStatus(trigger.signal, "OCR_99: BITMAP_COPY_FAILED")
+              finishLease(lease)
+              retryOrDefer(trigger)
               return
             }
-            processBitmap(signal, sb)
+            processBitmap(trigger, sb, lease)
           } catch (_: Exception) {
             try { sb?.recycle() } catch (_: Exception) {}
-            persistStatus(signal, "OCR_99: BITMAP_ERROR")
-            captureInFlight.set(false)
-            scheduleRetry()
+            persistStatus(trigger.signal, "OCR_99: BITMAP_ERROR")
+            finishLease(lease)
+            retryOrDefer(trigger)
           } finally {
             try { hb?.recycle() } catch (_: Exception) {}
             try { buffer.close() } catch (_: Exception) {}
@@ -208,51 +293,60 @@ class Ride99AccessibilityService : AccessibilityService() {
         }
 
         override fun onFailure(errorCode: Int) {
-          persistStatus(signal, "OCR_99: SCREENSHOT_ERROR code=$errorCode")
-          captureInFlight.set(false)
-          scheduleRetry(if (errorCode == ERROR_TAKE_SCREENSHOT_INTERVAL_TIME_SHORT) MIN_CAPTURE_INTERVAL_MS + 100L else RETRY_DELAY_MS)
+          persistStatus(trigger.signal, "OCR_99: SCREENSHOT_ERROR code=$errorCode")
+          finishLease(lease)
+          retryOrDefer(trigger, if (errorCode == ERROR_TAKE_SCREENSHOT_INTERVAL_TIME_SHORT) 800L else RETRY_DELAY_MS)
         }
       })
     } catch (_: Exception) {
-      persistStatus(signal, "OCR_99: INTERNAL_EXCEPTION")
-      captureInFlight.set(false)
-      scheduleRetry()
+      persistStatus(trigger.signal, "OCR_99: INTERNAL_EXCEPTION")
+      finishLease(lease)
+      retryOrDefer(trigger)
     }
   }
 
-  private fun processBitmap(signal: CaptureSignal, bitmap: Bitmap) {
+  private fun processBitmap(trigger: CaptureTrigger, bitmap: Bitmap, lease: CaptureLease) {
+    if (serviceDestroyed || !ScreenshotCaptureCoordinator.isActive(lease)) {
+      try { bitmap.recycle() } catch (_: Exception) {}
+      finishLease(lease)
+      return
+    }
     recognizer.process(InputImage.fromBitmap(bitmap, 0)).addOnSuccessListener { result ->
       try {
+        if (serviceDestroyed || !ScreenshotCaptureCoordinator.isActive(lease)) return@addOnSuccessListener
         val all = collectLines(result)
         val fareLine = findMainFareLine(all)
         if (fareLine == null) {
-          persistStatus(signal, "OCR_99: NO_CURRENT_OFFER_FARE retry=$retryAttempt/$MAX_RETRIES")
-          scheduleRetry()
+          persistStatus(trigger.signal, "OCR_99: NO_CURRENT_OFFER_FARE retry=${trigger.attempt}/$MAX_RETRIES")
+          retryOrDefer(trigger)
         } else {
           val card = isolateCardLines(all, fareLine)
           val decision = extractDecision(fareLine, card)
           if (decision != null) {
-            cancelRetry()
+            cancelRetryChain()
+            idleBackoff.onOfferDetected()
+            nextCaptureAtElapsed = SystemClock.elapsedRealtime() + OVERLAY_VISIBLE_MS
             showDecisionOverlay(decision)
-            persistOcrResult(signal, card, decision)
+            persistOcrResult(trigger.signal, card, decision)
+            scheduleForegroundPoll(OVERLAY_VISIBLE_MS)
           } else {
-            persistStatus(signal, "OCR_99: DECISION_REJECTED fare=${fareLine.text.take(40)} retry=$retryAttempt/$MAX_RETRIES")
-            persistRawOperational(signal, card)
-            scheduleRetry()
+            persistStatus(trigger.signal, "OCR_99: DECISION_REJECTED fare=${fareLine.text.take(40)} retry=${trigger.attempt}/$MAX_RETRIES")
+            persistRawOperational(trigger.signal, card)
+            retryOrDefer(trigger)
           }
         }
       } catch (_: Exception) {
-        persistStatus(signal, "OCR_99: RESULT_PROCESSING_ERROR")
-        scheduleRetry()
+        persistStatus(trigger.signal, "OCR_99: RESULT_PROCESSING_ERROR")
+        retryOrDefer(trigger)
       } finally {
         try { bitmap.recycle() } catch (_: Exception) {}
-        captureInFlight.set(false)
+        finishLease(lease)
       }
     }.addOnFailureListener { e ->
-      persistStatus(signal, "OCR_99: OCR_ERROR ${e.javaClass.simpleName}")
+      persistStatus(trigger.signal, "OCR_99: OCR_ERROR ${e.javaClass.simpleName}")
       try { bitmap.recycle() } catch (_: Exception) {}
-      captureInFlight.set(false)
-      scheduleRetry()
+      finishLease(lease)
+      retryOrDefer(trigger)
     }
   }
 
@@ -367,8 +461,12 @@ class Ride99AccessibilityService : AccessibilityService() {
   }
 
   private fun showDecisionOverlay(d: Decision) {
-    val now = System.currentTimeMillis()
-    if (d.signature == lastOverlaySignature && now - lastOverlayAt <= OVERLAY_DEDUPE_MS) return
+    val now = SystemClock.elapsedRealtime()
+    if (d.signature == lastOverlaySignature && overlayView != null && now - lastOverlayAt <= OVERLAY_DEDUPE_MS) {
+      lastOverlayAt = now
+      refreshOverlayExpiry()
+      return
+    }
     lastOverlaySignature = d.signature
     lastOverlayAt = now
     overlayHandler.post {
@@ -411,10 +509,21 @@ class Ride99AccessibilityService : AccessibilityService() {
       try {
         wm.addView(root, p)
         overlayView = root
-        val hide = Runnable { hideDecisionOverlay() }
-        overlayHideRunnable = hide
-        overlayHandler.postDelayed(hide, OVERLAY_VISIBLE_MS)
+        scheduleOverlayExpiry()
       } catch (_: Exception) { overlayView = null }
+    }
+  }
+
+  private fun scheduleOverlayExpiry() {
+    overlayHideRunnable?.let { overlayHandler.removeCallbacks(it) }
+    val hide = Runnable { hideDecisionOverlay() }
+    overlayHideRunnable = hide
+    overlayHandler.postDelayed(hide, OVERLAY_VISIBLE_MS)
+  }
+
+  private fun refreshOverlayExpiry() {
+    overlayHandler.post {
+      if (overlayView != null) scheduleOverlayExpiry()
     }
   }
 
@@ -455,10 +564,21 @@ class Ride99AccessibilityService : AccessibilityService() {
       if (!isOperational(l.text)) continue
       if (seen.add(normalize(l.text))) nodes.put(nodeJson(l.text.take(MAX_LINE_CHARS), l.bounds, signal.windowId))
     }
-    if (nodes.length() > 0) appendSnapshot(signal, nodes, "screenshotOcr99Rejected:${System.currentTimeMillis()}")
+    if (nodes.length() > 0) {
+      val signature = buildString {
+        for (i in 0 until nodes.length()) append(nodes.optJSONObject(i)?.optString("text", "")).append('|')
+      }.hashCode()
+      if (diagnosticLimiter.shouldEmit("raw-rejected:$signature", SystemClock.elapsedRealtime())) {
+        appendSnapshot(signal, nodes, "screenshotOcr99Rejected:$signature:${System.currentTimeMillis()}")
+      }
+    }
   }
 
   private fun persistStatus(signal: CaptureSignal, detail: String) {
+    val diagnosticKey = detail
+      .replace(Regex("""\s+retry=.*$"""), "")
+      .replace(Regex("""\s+code=\d+"""), "")
+    if (!diagnosticLimiter.shouldEmit(diagnosticKey, SystemClock.elapsedRealtime())) return
     appendSnapshot(signal, JSONArray().put(nodeJson(detail.take(MAX_LINE_CHARS * 2), Rect(0, 0, 0, 0), signal.windowId)), "screenshotOcr99Status:${detail.hashCode()}:${System.currentTimeMillis()}")
   }
 

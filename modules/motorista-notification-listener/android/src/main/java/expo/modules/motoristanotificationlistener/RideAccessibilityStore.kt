@@ -44,11 +44,13 @@ object RideAccessibilityStore {
     prefs.edit().putString(KEY_QUEUE, next.toString()).apply()
   }
 
+  @Synchronized
   fun read(context: Context): String {
     val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
     return prefs.getString(KEY_QUEUE, "[]") ?: "[]"
   }
 
+  @Synchronized
   fun clear(context: Context) {
     context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
       .edit()

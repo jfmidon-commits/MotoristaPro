@@ -1,5 +1,6 @@
 package expo.modules.motoristanotificationlistener
 
+import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.provider.Settings
@@ -59,6 +60,10 @@ class MotoristaNotificationListenerModule : Module() {
       }.toString()
     }
 
+    Function("getCaptureRuntimeHealthJson") {
+      ScreenshotCaptureCoordinator.statusJson()
+    }
+
     Function("openAccessibilitySettings") {
       val context = appContext.reactContext ?: return@Function false
       val intent = Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS).apply {
@@ -97,15 +102,15 @@ class MotoristaNotificationListenerModule : Module() {
       Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES
     ) ?: return false
 
-    val packageName = context.packageName.lowercase()
+    val packageName = context.packageName
     val suffix = serviceSuffix.lowercase()
     return enabled
       .split(':')
       .asSequence()
-      .map { it.trim().lowercase() }
-      .filter { it.isNotEmpty() }
+      .mapNotNull { ComponentName.unflattenFromString(it.trim()) }
       .any { component ->
-        component.contains(packageName) && component.endsWith(suffix)
+        component.packageName.equals(packageName, ignoreCase = true) &&
+          component.className.lowercase().endsWith(".$suffix")
       }
   }
 }
