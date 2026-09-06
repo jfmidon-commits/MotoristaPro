@@ -6,15 +6,21 @@ import {
   clearPendingAccessibilitySnapshots,
   clearPendingRideNotifications,
   getAccessibilityAccessStatus,
+  getAccessibilityServicesStatus,
   getNotificationAccessStatus,
   getPendingAccessibilitySnapshots,
   getPendingRideNotifications,
   openAccessibilitySettings,
   openNotificationAccessSettings,
   type AccessibilitySnapshot,
+  type AccessibilityServicesStatus,
   type CapturedRideNotification,
   type NativeNotificationPermissionStatus
 } from "../../modules/motorista-notification-listener";
+import {
+  accessibilityConfigurationLabel,
+  getAccessibilityConfigurationState
+} from "@/services/AccessibilityServiceStatus";
 import { parseRideNotification } from "@/services/NotificationOfferParser";
 import { parseAccessibilitySnapshot } from "@/services/AccessibilityOfferParser";
 import { assessUberStructuralOffer } from "@/services/AccessibilityStructuralDiagnostics";
@@ -122,6 +128,11 @@ function notificationPreview(notification: CapturedRideNotification): string[] {
 export default function NotificationCaptureScreen() {
   const [status, setStatus] = useState<NativeNotificationPermissionStatus>("unavailable");
   const [a11yStatus, setA11yStatus] = useState<NativeNotificationPermissionStatus>("unavailable");
+  const [a11yServices, setA11yServices] = useState<AccessibilityServicesStatus>({
+    uberCapture: false,
+    capture99: false,
+    lifecycle: false
+  });
   const [notifications, setNotifications] = useState<CapturedRideNotification[]>([]);
   const [snapshots, setSnapshots] = useState<AccessibilitySnapshot[]>([]);
   const [refreshing, setRefreshing] = useState(false);
@@ -130,6 +141,7 @@ export default function NotificationCaptureScreen() {
   const load = useCallback(() => {
     setStatus(getNotificationAccessStatus());
     setA11yStatus(getAccessibilityAccessStatus());
+    setA11yServices(getAccessibilityServicesStatus());
     setNotifications(getPendingRideNotifications());
     setSnapshots(getPendingAccessibilitySnapshots());
     setLastUpdatedAt(Date.now());
@@ -170,6 +182,7 @@ export default function NotificationCaptureScreen() {
   const parsed = dedupeOffers([...parsedA11y, ...parsedNotifications]);
   const latestNotifications = notifications.slice().reverse().slice(0, 5);
   const latestSnapshots = snapshots.slice().reverse().slice(0, 5);
+  const a11yConfiguration = getAccessibilityConfigurationState(a11yStatus, a11yServices);
 
   return (
     <SafeAreaView style={styles.container} edges={["bottom"]}>
@@ -192,7 +205,17 @@ export default function NotificationCaptureScreen() {
         </View>
 
         <View style={styles.statusCard}>
-          <Text style={styles.statusTitle}>Acessibilidade: {permissionLabel(a11yStatus)}</Text>
+          <Text style={styles.statusTitle}>
+            Acessibilidade: {accessibilityConfigurationLabel(a11yConfiguration)}
+          </Text>
+          <Text style={styles.statusText}>
+            Uber {a11yServices.uberCapture ? "ativa" : "inativa"} • 99 {a11yServices.capture99 ? "ativa" : "inativa"} • ciclo da corrida {a11yServices.lifecycle ? "ativo" : "inativo"}
+          </Text>
+          {a11yConfiguration === "partial" ? (
+            <Text style={styles.statusWarning}>
+              Ative o ciclo da corrida e pelo menos uma captura (Uber ou 99).
+            </Text>
+          ) : null}
           <Text style={styles.statusText}>{snapshots.length} snapshot(s) sanitizado(s) na fila local.</Text>
           <Text style={styles.statusText}>Última leitura da tela: {formatCapturedAt(lastUpdatedAt)}</Text>
         </View>
@@ -349,6 +372,7 @@ const styles = StyleSheet.create({
   statusCard: { backgroundColor: "#172554", borderRadius: 14, padding: 16, marginTop: 16, marginBottom: 14 },
   statusTitle: { color: "#fff", fontWeight: "900", fontSize: 16 },
   statusText: { color: "#CBD5E1", marginTop: 5 },
+  statusWarning: { color: "#FBBF24", marginTop: 7, lineHeight: 19, fontWeight: "700" },
   primaryButton: { backgroundColor: "#38BDF8", borderRadius: 12, padding: 14, alignItems: "center", marginBottom: 10 },
   primaryButtonText: { color: "#082F49", fontWeight: "900" },
   secondaryButton: { backgroundColor: "#1E293B", borderRadius: 12, padding: 13, alignItems: "center", marginBottom: 10 },
