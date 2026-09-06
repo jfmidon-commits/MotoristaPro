@@ -31,14 +31,9 @@ import kotlin.math.max
 /**
  * Experimental Uber offer reader.
  *
- * Rules:
- * - every decision comes from ONE currently visible Uber card;
- * - Aceitar/Selecionar anchors the bottom of the card;
- * - the largest eligible R$ line is the fare;
- * - route legs are read only between fare and action button;
- * - hour durations such as "1 h e 4 min" are converted to 64 minutes;
- * - mixed/contaminated frames are rejected instead of guessed;
- * - a short controlled retry chain handles Uber cards that render just after the accessibility event.
+ * The service is read-only. Accessibility events trigger immediate captures and
+ * a small foreground watchdog keeps polling while Uber remains visible, because
+ * an offer can remain on screen without generating another accessibility event.
  */
 class RideAccessibilityService : AccessibilityService() {
   companion object {
@@ -50,6 +45,8 @@ class RideAccessibilityService : AccessibilityService() {
     private const val OVERLAY_STALE_MS = 2_500L
     private const val OVERLAY_DEDUPE_MS = 20_000L
     private const val NO_OFFER_SEQUENCES_TO_HIDE = 2
+    private const val FOREGROUND_POLL_FAST_MS = 1_200L
+    private const val FOREGROUND_POLL_IDLE_MS = 5_000L
     private val RETRY_DELAYS_MS = longArrayOf(650L, 900L, 1_250L)
     private val IDLE_BACKOFF_MS = longArrayOf(1_500L, 3_000L, 5_000L, 8_000L)
 
@@ -66,37 +63,24 @@ class RideAccessibilityService : AccessibilityService() {
       """(?:R\$|RS|R5)\s*([0-9]{1,5}(?:[.,][0-9]{1,2})?)""",
       RegexOption.IGNORE_CASE
     )
-
     private val DISTANCE_REGEX = Regex(
       """([0-9]{1,3}(?:[.,][0-9]+)?)\s*km\b""",
       RegexOption.IGNORE_CASE
     )
-
     private val MINUTE_REGEX = Regex(
       """([0-9]{1,3})\s*(?:min|minuto|minutos)\b""",
       RegexOption.IGNORE_CASE
     )
-
     private val HOUR_MINUTE_REGEX = Regex(
       """([0-9]{1,2})\s*(?:h|hora|horas)\b(?:\s*(?:e)?\s*([0-9]{1,2})\s*(?:min|minuto|minutos)\b)?""",
       RegexOption.IGNORE_CASE
     )
-
     private val APPROX_PER_KM_REGEX = Regex(
       """(?:R\$|RS|R5)?\s*([0-9]{1,3}(?:[.,][0-9]{1,2})?)\s*/\s*km""",
       RegexOption.IGNORE_CASE
     )
-
-    private val ACTION_REGEX = Regex(
-      """\b(?:Aceitar|Selecionar)\b""",
-      RegexOption.IGNORE_CASE
-    )
-
-    private val STOP_REGEX = Regex(
-      """\bparada(?:s)?\b""",
-      RegexOption.IGNORE_CASE
-    )
-
+    private val ACTION_REGEX = Regex("""\b(?:Aceitar|Selecionar)\b""", RegexOption.IGNORE_CASE)
+    private val STOP_REGEX = Regex("""\bparada(?:s)?\b""", RegexOption.IGNORE_CASE)
     private val OPERATIONAL_PATTERNS = listOf(
       Regex("""(?:R\$|RS|R5)\s*[+]?\s*[0-9]{1,5}(?:[.,][0-9]{1,3})?""", RegexOption.IGNORE_CASE),
       Regex("""[0-9]+(?:[.,][0-9]+)?\s*km\b""", RegexOption.IGNORE_CASE),
@@ -109,50 +93,17 @@ class RideAccessibilityService : AccessibilityService() {
     )
   }
 
-  private data class UberWindowSignal(
-    val id: Int,
-    val type: Int,
-    val bounds: Rect,
-    val focused: Boolean,
-    val active: Boolean
-  )
-
-  private data class CaptureTrigger(
-    val eventType: Int,
-    val windowId: Int,
-    val attempt: Int,
-    val chainId: Long,
-    val admissionAttempt: Int = 0
-  )
-
+  private data class UberWindowSignal(val id: Int, val type: Int, val bounds: Rect, val focused: Boolean, val active: Boolean)
+  private data class CaptureTrigger(val eventType: Int, val windowId: Int, val attempt: Int, val chainId: Long, val admissionAttempt: Int = 0)
   private data class OcrLineRecord(val text: String, val bounds: Rect)
-
-  private data class OfferCard(
-    val lines: List<OcrLineRecord>,
-    val mainFareLine: OcrLineRecord,
-    val actionLine: OcrLineRecord
-  )
-
+  private data class OfferCard(val lines: List<OcrLineRecord>, val mainFareLine: OcrLineRecord, val actionLine: OcrLineRecord)
   private data class RouteLeg(val minutes: Int, val km: Double, val top: Int)
-
-  private data class DecisionOverlayData(
-    val fare: Double,
-    val totalKm: Double,
-    val totalMinutes: Int,
-    val reaisPerKm: Double,
-    val reaisPerHour: Double,
-    val semaphore: String,
-    val hasStops: Boolean,
-    val signature: String
-  )
-
-  private data class DecisionExtraction(
-    val data: DecisionOverlayData?,
-    val reason: String
-  )
+  private data class DecisionOverlayData(val fare: Double, val totalKm: Double, val totalMinutes: Int, val reaisPerKm: Double, val reaisPerHour: Double, val semaphore: String, val hasStops: Boolean, val signature: String)
+  private data class DecisionExtraction(val data: DecisionOverlayData?, val reason: String)
 
   private val overlayHandler = Handler(Looper.getMainLooper())
   private val retryHandler = Handler(Looper.getMainLooper())
+  private val foregroundPollHandler = Handler(Looper.getMainLooper())
   private val idleBackoff = AdaptivePollingPolicy(IDLE_BACKOFF_MS)
   private val diagnosticLimiter = DiagnosticRateLimiter(DIAGNOSTIC_REPEAT_INTERVAL_MS)
   private var retryRunnable: Runnable? = null
@@ -166,13 +117,38 @@ class RideAccessibilityService : AccessibilityService() {
   private var lastOverlayAt: Long = 0L
   private var consecutiveNoOfferSequences = 0
 
-  private val recognizer by lazy {
-    TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
+  private val recognizer by lazy { TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS) }
+
+  private val foregroundPollRunnable = object : Runnable {
+    override fun run() {
+      if (serviceDestroyed) return
+      try {
+        val window = findBestUberWindow()
+        val now = SystemClock.elapsedRealtime()
+        if (
+          isOfferSizedUberWindow(window) &&
+          now >= nextEventCaptureAtElapsed &&
+          retryRunnable == null &&
+          activeLease == null
+        ) {
+          val chainId = beginRetryChain()
+          attemptCapture(CaptureTrigger(AccessibilityEvent.TYPE_WINDOWS_CHANGED, window!!.id, 0, chainId))
+        }
+      } catch (_: Exception) {
+      } finally {
+        if (!serviceDestroyed) {
+          val delay = if (isOfferSizedUberWindow(findBestUberWindow())) FOREGROUND_POLL_FAST_MS else FOREGROUND_POLL_IDLE_MS
+          foregroundPollHandler.postDelayed(this, delay)
+        }
+      }
+    }
   }
 
   override fun onServiceConnected() {
     super.onServiceConnected()
     serviceDestroyed = false
+    foregroundPollHandler.removeCallbacks(foregroundPollRunnable)
+    foregroundPollHandler.post(foregroundPollRunnable)
   }
 
   override fun onAccessibilityEvent(event: AccessibilityEvent?) {
@@ -181,8 +157,7 @@ class RideAccessibilityService : AccessibilityService() {
     if (eventPackage != null && eventPackage != UBER_PACKAGE) return
 
     val elapsed = SystemClock.elapsedRealtime()
-    val strongSignal = event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED ||
-      event.eventType == AccessibilityEvent.TYPE_WINDOWS_CHANGED
+    val strongSignal = event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED || event.eventType == AccessibilityEvent.TYPE_WINDOWS_CHANGED
     if (strongSignal) {
       idleBackoff.onStrongSignal()
       nextEventCaptureAtElapsed = 0L
@@ -191,22 +166,14 @@ class RideAccessibilityService : AccessibilityService() {
     }
 
     val chainId = beginRetryChain()
-    attemptCapture(
-      CaptureTrigger(
-        eventType = event.eventType,
-        windowId = event.windowId,
-        attempt = 0,
-        chainId = chainId
-      )
-    )
+    attemptCapture(CaptureTrigger(event.eventType, event.windowId, 0, chainId))
   }
 
-  override fun onInterrupt() {
-    cancelRetryChain()
-  }
+  override fun onInterrupt() { cancelRetryChain() }
 
   override fun onDestroy() {
     serviceDestroyed = true
+    foregroundPollHandler.removeCallbacks(foregroundPollRunnable)
     cancelRetryChain()
     hideDecisionOverlay()
     activeLease?.let(ScreenshotCaptureCoordinator::release)
@@ -215,12 +182,11 @@ class RideAccessibilityService : AccessibilityService() {
     super.onDestroy()
   }
 
-  private fun isRelevantEventType(eventType: Int): Boolean {
-    return eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED ||
+  private fun isRelevantEventType(eventType: Int): Boolean =
+    eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED ||
       eventType == AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED ||
       eventType == AccessibilityEvent.TYPE_WINDOWS_CHANGED ||
       eventType == AccessibilityEvent.TYPE_VIEW_SCROLLED
-  }
 
   private fun beginRetryChain(): Long {
     retryRunnable?.let { retryHandler.removeCallbacks(it) }
@@ -236,9 +202,7 @@ class RideAccessibilityService : AccessibilityService() {
   }
 
   private fun scheduleRetry(trigger: CaptureTrigger, delayMs: Long? = null) {
-    if (trigger.chainId != retryGeneration) return
-    if (trigger.attempt >= RETRY_DELAYS_MS.size) return
-
+    if (trigger.chainId != retryGeneration || trigger.attempt >= RETRY_DELAYS_MS.size) return
     retryRunnable?.let { retryHandler.removeCallbacks(it) }
     val nextAttempt = trigger.attempt + 1
     val delay = delayMs ?: RETRY_DELAYS_MS[trigger.attempt]
@@ -260,9 +224,8 @@ class RideAccessibilityService : AccessibilityService() {
 
     val uberWindow = findBestUberWindow()
     if (!isOfferSizedUberWindow(uberWindow)) {
-      if (trigger.attempt < RETRY_DELAYS_MS.size) {
-        scheduleRetry(trigger)
-      } else {
+      if (trigger.attempt < RETRY_DELAYS_MS.size) scheduleRetry(trigger)
+      else {
         confirmNoOfferSequence(trigger, uberWindow, "WINDOW_NOT_READY")
         deferAfterMiss()
       }
@@ -291,29 +254,19 @@ class RideAccessibilityService : AccessibilityService() {
         try {
           val pkg = try { root?.packageName?.toString()?.lowercase() } catch (_: Exception) { null }
           if (pkg != UBER_PACKAGE) continue
-
           val bounds = Rect()
           try { window.getBoundsInScreen(bounds) } catch (_: Exception) { bounds.set(0, 0, 0, 0) }
-          val candidate = UberWindowSignal(
-            id = window.id,
-            type = window.type,
-            bounds = bounds,
-            focused = window.isFocused,
-            active = window.isActive
-          )
+          val candidate = UberWindowSignal(window.id, window.type, bounds, window.isFocused, window.isActive)
           if (best == null || safeArea(candidate.bounds) > safeArea(best!!.bounds)) best = candidate
         } finally {
           try { root?.recycle() } catch (_: Exception) {}
-          root = null
         }
       }
     } catch (_: Exception) {}
     return best
   }
 
-  private fun safeArea(bounds: Rect): Long {
-    return bounds.width().coerceAtLeast(0).toLong() * bounds.height().coerceAtLeast(0).toLong()
-  }
+  private fun safeArea(bounds: Rect): Long = bounds.width().coerceAtLeast(0).toLong() * bounds.height().coerceAtLeast(0).toLong()
 
   private fun isOfferSizedUberWindow(window: UberWindowSignal?): Boolean {
     if (window == null) return false
@@ -323,96 +276,68 @@ class RideAccessibilityService : AccessibilityService() {
     val areaRatio = safeArea(window.bounds).toDouble() / screenArea.toDouble()
     val widthRatio = window.bounds.width().toDouble() / screenW.toDouble()
     val heightRatio = window.bounds.height().toDouble() / screenH.toDouble()
-    return areaRatio >= MIN_UBER_WINDOW_AREA_RATIO &&
-      widthRatio >= MIN_UBER_WINDOW_WIDTH_RATIO &&
-      heightRatio >= MIN_UBER_WINDOW_HEIGHT_RATIO
+    return areaRatio >= MIN_UBER_WINDOW_AREA_RATIO && widthRatio >= MIN_UBER_WINDOW_WIDTH_RATIO && heightRatio >= MIN_UBER_WINDOW_HEIGHT_RATIO
   }
 
-  private fun takeDisplayScreenshot(
-    trigger: CaptureTrigger,
-    uberWindow: UberWindowSignal?,
-    lease: CaptureLease
-  ) {
+  private fun takeDisplayScreenshot(trigger: CaptureTrigger, uberWindow: UberWindowSignal?, lease: CaptureLease) {
     try {
-      takeScreenshot(
-        Display.DEFAULT_DISPLAY,
-        mainExecutor,
-        object : TakeScreenshotCallback {
-          override fun onSuccess(screenshot: ScreenshotResult) {
-            val buffer = screenshot.hardwareBuffer
-            var hardwareBitmap: Bitmap? = null
-            var softwareBitmap: Bitmap? = null
-            try {
-              hardwareBitmap = Bitmap.wrapHardwareBuffer(buffer, screenshot.colorSpace)
-              if (hardwareBitmap == null) {
-                persistStatus(trigger, uberWindow, "OCR_PROBE: BITMAP_WRAP_FAILED")
-                finishLease(lease)
-                retryOrDefer(trigger)
-                return
-              }
-              softwareBitmap = hardwareBitmap.copy(Bitmap.Config.ARGB_8888, false)
-              if (softwareBitmap == null) {
-                persistStatus(trigger, uberWindow, "OCR_PROBE: BITMAP_COPY_FAILED")
-                finishLease(lease)
-                retryOrDefer(trigger)
-                return
-              }
-              processBitmap(trigger, uberWindow, softwareBitmap, lease)
-            } catch (_: Exception) {
-              try { softwareBitmap?.recycle() } catch (_: Exception) {}
-              persistStatus(trigger, uberWindow, "OCR_PROBE: BITMAP_ERROR")
-              finishLease(lease)
-              retryOrDefer(trigger)
-            } finally {
-              try { hardwareBitmap?.recycle() } catch (_: Exception) {}
-              try { buffer.close() } catch (_: Exception) {}
+      takeScreenshot(Display.DEFAULT_DISPLAY, mainExecutor, object : TakeScreenshotCallback {
+        override fun onSuccess(screenshot: ScreenshotResult) {
+          val buffer = screenshot.hardwareBuffer
+          var hardwareBitmap: Bitmap? = null
+          var softwareBitmap: Bitmap? = null
+          try {
+            hardwareBitmap = Bitmap.wrapHardwareBuffer(buffer, screenshot.colorSpace)
+            if (hardwareBitmap == null) {
+              persistStatus(trigger, uberWindow, "OCR_PROBE: BITMAP_WRAP_FAILED")
+              finishLease(lease); retryOrDefer(trigger); return
             }
-          }
-
-          override fun onFailure(errorCode: Int) {
-            try {
-              persistStatus(trigger, uberWindow, "OCR_PROBE: ${mapError(errorCode)} code=$errorCode")
-            } finally {
-              finishLease(lease)
-              val delay = if (errorCode == ERROR_TAKE_SCREENSHOT_INTERVAL_TIME_SHORT) 800L else null
-              retryOrDefer(trigger, delay)
+            softwareBitmap = hardwareBitmap.copy(Bitmap.Config.ARGB_8888, false)
+            if (softwareBitmap == null) {
+              persistStatus(trigger, uberWindow, "OCR_PROBE: BITMAP_COPY_FAILED")
+              finishLease(lease); retryOrDefer(trigger); return
             }
+            processBitmap(trigger, uberWindow, softwareBitmap, lease)
+          } catch (_: Exception) {
+            try { softwareBitmap?.recycle() } catch (_: Exception) {}
+            persistStatus(trigger, uberWindow, "OCR_PROBE: BITMAP_ERROR")
+            finishLease(lease); retryOrDefer(trigger)
+          } finally {
+            try { hardwareBitmap?.recycle() } catch (_: Exception) {}
+            try { buffer.close() } catch (_: Exception) {}
           }
         }
-      )
+        override fun onFailure(errorCode: Int) {
+          try { persistStatus(trigger, uberWindow, "OCR_PROBE: ${mapError(errorCode)} code=$errorCode") }
+          finally {
+            finishLease(lease)
+            retryOrDefer(trigger, if (errorCode == ERROR_TAKE_SCREENSHOT_INTERVAL_TIME_SHORT) 800L else null)
+          }
+        }
+      })
     } catch (_: SecurityException) {
       persistStatus(trigger, uberWindow, "OCR_PROBE: SECURITY_EXCEPTION")
       finishLease(lease)
     } catch (_: Exception) {
       persistStatus(trigger, uberWindow, "OCR_PROBE: INTERNAL_EXCEPTION")
-      finishLease(lease)
-      retryOrDefer(trigger)
+      finishLease(lease); retryOrDefer(trigger)
     }
   }
 
-  private fun processBitmap(
-    trigger: CaptureTrigger,
-    uberWindow: UberWindowSignal?,
-    bitmap: Bitmap,
-    lease: CaptureLease
-  ) {
+  private fun processBitmap(trigger: CaptureTrigger, uberWindow: UberWindowSignal?, bitmap: Bitmap, lease: CaptureLease) {
     if (serviceDestroyed || !ScreenshotCaptureCoordinator.isActive(lease)) {
       try { bitmap.recycle() } catch (_: Exception) {}
-      finishLease(lease)
-      return
+      finishLease(lease); return
     }
     val width = bitmap.width
     val height = bitmap.height
-    val image = InputImage.fromBitmap(bitmap, 0)
-
-    recognizer.process(image)
+    recognizer.process(InputImage.fromBitmap(bitmap, 0))
       .addOnSuccessListener { result ->
         try {
           if (serviceDestroyed || !ScreenshotCaptureCoordinator.isActive(lease)) return@addOnSuccessListener
           val card = extractCurrentOfferCard(result)
-          if (card == null) {
-            handleNoCurrentOffer(trigger, uberWindow)
-          } else {
+          if (card == null) handleNoCurrentOffer(trigger, uberWindow)
+          else {
             consecutiveNoOfferSequences = 0
             val extraction = extractDecisionOverlayData(card)
             if (extraction.data != null) {
@@ -437,23 +362,16 @@ class RideAccessibilityService : AccessibilityService() {
         try { persistStatus(trigger, uberWindow, "OCR_PROBE: OCR_ERROR ${error.javaClass.simpleName}") }
         finally {
           try { bitmap.recycle() } catch (_: Exception) {}
-          finishLease(lease)
-          retryOrDefer(trigger)
+          finishLease(lease); retryOrDefer(trigger)
         }
       }
   }
 
   private fun handleNoCurrentOffer(trigger: CaptureTrigger, uberWindow: UberWindowSignal?) {
     if (trigger.attempt < RETRY_DELAYS_MS.size) {
-      persistStatus(
-        trigger,
-        uberWindow,
-        "OCR_PROBE: NO_CURRENT_OFFER_CARD retry=${trigger.attempt + 1}/${RETRY_DELAYS_MS.size}"
-      )
-      scheduleRetry(trigger)
-      return
+      persistStatus(trigger, uberWindow, "OCR_PROBE: NO_CURRENT_OFFER_CARD retry=${trigger.attempt + 1}/${RETRY_DELAYS_MS.size}")
+      scheduleRetry(trigger); return
     }
-
     confirmNoOfferSequence(trigger, uberWindow, "NO_CURRENT_OFFER_CARD")
     deferAfterMiss()
   }
@@ -461,33 +379,24 @@ class RideAccessibilityService : AccessibilityService() {
   private fun confirmNoOfferSequence(trigger: CaptureTrigger, uberWindow: UberWindowSignal?, reason: String) {
     consecutiveNoOfferSequences += 1
     if (consecutiveNoOfferSequences >= NO_OFFER_SEQUENCES_TO_HIDE) {
-      hideDecisionOverlay()
-      lastOverlaySignature = null
-      lastOverlayAt = 0L
-      consecutiveNoOfferSequences = 0
+      hideDecisionOverlay(); lastOverlaySignature = null; lastOverlayAt = 0L; consecutiveNoOfferSequences = 0
       persistStatus(trigger, uberWindow, "OCR_PROBE: OFFER_CLEARED confirmed=$reason")
-    } else {
-      persistStatus(trigger, uberWindow, "OCR_PROBE: NO_CURRENT_OFFER_CARD confirmed=$reason")
-    }
+    } else persistStatus(trigger, uberWindow, "OCR_PROBE: NO_CURRENT_OFFER_CARD confirmed=$reason")
   }
 
   private fun deferAfterMiss() {
-    val delay = idleBackoff.onMiss()
-    nextEventCaptureAtElapsed = SystemClock.elapsedRealtime() + delay
+    nextEventCaptureAtElapsed = SystemClock.elapsedRealtime() + idleBackoff.onMiss()
   }
 
   private fun retryOrDefer(trigger: CaptureTrigger, delayMs: Long? = null) {
-    if (trigger.attempt < RETRY_DELAYS_MS.size) scheduleRetry(trigger, delayMs)
-    else deferAfterMiss()
+    if (trigger.attempt < RETRY_DELAYS_MS.size) scheduleRetry(trigger, delayMs) else deferAfterMiss()
   }
 
   private fun retryAfterContention(trigger: CaptureTrigger) {
-    if (trigger.chainId != retryGeneration) return
-    if (trigger.admissionAttempt >= MAX_ADMISSION_RETRIES) {
-      deferAfterMiss()
+    if (trigger.chainId != retryGeneration || trigger.admissionAttempt >= MAX_ADMISSION_RETRIES) {
+      if (trigger.chainId == retryGeneration) deferAfterMiss()
       return
     }
-
     retryRunnable?.let { retryHandler.removeCallbacks(it) }
     val runnable = Runnable {
       if (trigger.chainId != retryGeneration || serviceDestroyed) return@Runnable
@@ -505,58 +414,31 @@ class RideAccessibilityService : AccessibilityService() {
 
   private fun extractCurrentOfferCard(result: Text): OfferCard? {
     val allLines = mutableListOf<OcrLineRecord>()
-    for (block in result.textBlocks) {
-      for (line in block.lines) {
-        val text = line.text.trim()
-        val bounds = line.boundingBox ?: continue
-        if (text.isNotBlank()) allLines.add(OcrLineRecord(text, Rect(bounds)))
-      }
+    for (block in result.textBlocks) for (line in block.lines) {
+      val text = line.text.trim(); val bounds = line.boundingBox ?: continue
+      if (text.isNotBlank()) allLines.add(OcrLineRecord(text, Rect(bounds)))
     }
     if (allLines.isEmpty()) return null
-
-    val actionLine = allLines
-      .filter { ACTION_REGEX.containsMatchIn(it.text) }
-      .maxByOrNull { centerY(it.bounds) }
-      ?: return null
-
+    val actionLine = allLines.filter { ACTION_REGEX.containsMatchIn(it.text) }.maxByOrNull { centerY(it.bounds) } ?: return null
     val eligibleFares = allLines.filter { line ->
       if (line.bounds.bottom >= actionLine.bounds.top) return@filter false
       val normalized = normalize(line.text)
-      if (
-        normalized.contains("/km") ||
-        normalized.contains("aprox") ||
-        normalized.contains("incluido") ||
-        normalized.contains("incluído") ||
-        normalized.trimStart().startsWith("+")
-      ) return@filter false
+      if (normalized.contains("/km") || normalized.contains("aprox") || normalized.contains("incluido") || normalized.contains("incluído") || normalized.trimStart().startsWith("+")) return@filter false
       FARE_REGEX.containsMatchIn(line.text)
     }
     if (eligibleFares.isEmpty()) return null
-
-    val mainFare = eligibleFares.maxWithOrNull(
-      compareBy<OcrLineRecord> { it.bounds.height() }
-        .thenBy { it.bounds.width() }
-        .thenBy { centerY(it.bounds) }
-    ) ?: return null
-
+    val mainFare = eligibleFares.maxWithOrNull(compareBy<OcrLineRecord> { it.bounds.height() }.thenBy { it.bounds.width() }.thenBy { centerY(it.bounds) }) ?: return null
     if (actionLine.bounds.top <= mainFare.bounds.bottom) return null
-
     val horizontalPad = dp(50)
     val actionCenterX = actionLine.bounds.left + actionLine.bounds.width() / 2
     val cardLeft = (actionCenterX - resources.displayMetrics.widthPixels * 0.50).toInt().coerceAtLeast(0)
-    val cardRight = (actionCenterX + resources.displayMetrics.widthPixels * 0.50).toInt()
-      .coerceAtMost(resources.displayMetrics.widthPixels)
+    val cardRight = (actionCenterX + resources.displayMetrics.widthPixels * 0.50).toInt().coerceAtMost(resources.displayMetrics.widthPixels)
     val cardTop = (mainFare.bounds.top - dp(130)).coerceAtLeast(0)
     val cardBottom = actionLine.bounds.bottom + dp(20)
-
-    val cardLines = allLines
-      .filter {
-        val cy = centerY(it.bounds)
-        val cx = it.bounds.left + it.bounds.width() / 2
-        cy in cardTop..cardBottom && cx in (cardLeft - horizontalPad)..(cardRight + horizontalPad)
-      }
-      .sortedWith(compareBy<OcrLineRecord> { it.bounds.top }.thenBy { it.bounds.left })
-
+    val cardLines = allLines.filter {
+      val cy = centerY(it.bounds); val cx = it.bounds.left + it.bounds.width() / 2
+      cy in cardTop..cardBottom && cx in (cardLeft - horizontalPad)..(cardRight + horizontalPad)
+    }.sortedWith(compareBy<OcrLineRecord> { it.bounds.top }.thenBy { it.bounds.left })
     return OfferCard(cardLines, mainFare, actionLine)
   }
 
@@ -565,24 +447,16 @@ class RideAccessibilityService : AccessibilityService() {
     if (hourMatch != null) {
       val hours = hourMatch.groupValues.getOrNull(1)?.toIntOrNull() ?: return null
       val mins = hourMatch.groupValues.getOrNull(2)?.toIntOrNull() ?: 0
-      val total = hours * 60 + mins
-      return total.takeIf { it in 1..360 }
+      return (hours * 60 + mins).takeIf { it in 1..360 }
     }
-
-    return MINUTE_REGEX.find(text)
-      ?.groupValues?.getOrNull(1)
-      ?.toIntOrNull()
-      ?.takeIf { it in 1..360 }
+    return MINUTE_REGEX.find(text)?.groupValues?.getOrNull(1)?.toIntOrNull()?.takeIf { it in 1..360 }
   }
 
   private fun extractRouteLegs(card: OfferCard): List<RouteLeg> {
     val routeLines = card.lines.filter { line ->
-      line.bounds.top > card.mainFareLine.bounds.bottom &&
-        line.bounds.bottom < card.actionLine.bounds.top &&
-        !normalize(line.text).contains("/km") &&
-        !normalize(line.text).contains("aprox")
+      line.bounds.top > card.mainFareLine.bounds.bottom && line.bounds.bottom < card.actionLine.bounds.top &&
+        !normalize(line.text).contains("/km") && !normalize(line.text).contains("aprox")
     }
-
     val direct = LinkedHashMap<String, RouteLeg>()
     routeLines.forEach { line ->
       val minutes = parseDurationMinutes(line.text)
@@ -592,391 +466,148 @@ class RideAccessibilityService : AccessibilityService() {
         direct.putIfAbsent(key, RouteLeg(minutes, distance, line.bounds.top))
       }
     }
-
     if (direct.size in 2..3) return direct.values.sortedBy { it.top }
-
-    val timeLines = routeLines.mapNotNull { line ->
-      parseDurationMinutes(line.text)?.let { it to line }
-    }
-    val distanceLines = routeLines.mapNotNull { line ->
-      DISTANCE_REGEX.find(line.text)?.groupValues?.getOrNull(1)?.let(::parseDecimal)?.let { km -> km to line }
-    }
-
-    val usedDistance = HashSet<Int>()
-    val paired = LinkedHashMap<String, RouteLeg>()
+    val timeLines = routeLines.mapNotNull { line -> parseDurationMinutes(line.text)?.let { it to line } }
+    val distanceLines = routeLines.mapNotNull { line -> DISTANCE_REGEX.find(line.text)?.groupValues?.getOrNull(1)?.let(::parseDecimal)?.let { km -> km to line } }
+    val usedDistance = HashSet<Int>(); val paired = LinkedHashMap<String, RouteLeg>()
     for ((minutes, timeLine) in timeLines) {
-      var bestIndex = -1
-      var bestScore = Int.MAX_VALUE
+      var bestIndex = -1; var bestScore = Int.MAX_VALUE
       distanceLines.forEachIndexed { index, (_, distLine) ->
         if (usedDistance.contains(index)) return@forEachIndexed
         val dy = abs(centerY(timeLine.bounds) - centerY(distLine.bounds))
-        if (dy < bestScore) {
-          bestScore = dy
-          bestIndex = index
-        }
+        if (dy < bestScore) { bestScore = dy; bestIndex = index }
       }
       if (bestIndex >= 0 && bestScore <= dp(48)) {
-        usedDistance.add(bestIndex)
-        val km = distanceLines[bestIndex].first
+        usedDistance.add(bestIndex); val km = distanceLines[bestIndex].first
         if (km > 0.0 && km <= 150.0) {
           val key = "$minutes|${String.format(Locale.US, "%.2f", km)}"
-          paired.putIfAbsent(
-            key,
-            RouteLeg(minutes, km, minOf(timeLine.bounds.top, distanceLines[bestIndex].second.bounds.top))
-          )
+          paired.putIfAbsent(key, RouteLeg(minutes, km, minOf(timeLine.bounds.top, distanceLines[bestIndex].second.bounds.top)))
         }
       }
     }
-
     return paired.values.sortedBy { it.top }
   }
 
   private fun extractDecisionOverlayData(card: OfferCard): DecisionExtraction {
-    val fare = FARE_REGEX.find(card.mainFareLine.text)
-      ?.groupValues?.getOrNull(1)
-      ?.let(::parseDecimal)
-      ?.takeIf { it > 0.0 }
+    val fare = FARE_REGEX.find(card.mainFareLine.text)?.groupValues?.getOrNull(1)?.let(::parseDecimal)?.takeIf { it > 0.0 }
       ?: return DecisionExtraction(null, "fare")
-
     val routeLegs = extractRouteLegs(card)
-    if (routeLegs.size !in 2..3) {
-      return DecisionExtraction(null, "legs=${routeLegs.size}")
-    }
-
-    val totalMinutes = routeLegs.sumOf { it.minutes }
-    val totalKm = routeLegs.sumOf { it.km }
-    if (totalMinutes !in 2..360 || totalKm <= 0.0 || totalKm > 200.0) {
-      return DecisionExtraction(null, "totals=${totalMinutes}min/${format1(totalKm)}km")
-    }
-
-    val reaisPerKm = fare / totalKm
-    val reaisPerHour = fare / (totalMinutes / 60.0)
-
-    val uberApproxPerKm = card.lines.asSequence()
-      .filter { normalize(it.text).contains("/km") }
-      .mapNotNull { APPROX_PER_KM_REGEX.find(it.text)?.groupValues?.getOrNull(1)?.let(::parseDecimal) }
-      .firstOrNull { it > 0.0 }
-
+    if (routeLegs.size !in 2..3) return DecisionExtraction(null, "legs=${routeLegs.size}")
+    val totalMinutes = routeLegs.sumOf { it.minutes }; val totalKm = routeLegs.sumOf { it.km }
+    if (totalMinutes !in 2..360 || totalKm <= 0.0 || totalKm > 200.0) return DecisionExtraction(null, "totals=${totalMinutes}min/${format1(totalKm)}km")
+    val reaisPerKm = fare / totalKm; val reaisPerHour = fare / (totalMinutes / 60.0)
+    val uberApproxPerKm = card.lines.asSequence().filter { normalize(it.text).contains("/km") }
+      .mapNotNull { APPROX_PER_KM_REGEX.find(it.text)?.groupValues?.getOrNull(1)?.let(::parseDecimal) }.firstOrNull { it > 0.0 }
     if (uberApproxPerKm != null) {
       val tolerance = max(0.18, uberApproxPerKm * 0.14)
-      if (abs(reaisPerKm - uberApproxPerKm) > tolerance) {
-        return DecisionExtraction(
-          null,
-          "rate expected=${format2(uberApproxPerKm)} actual=${format2(reaisPerKm)}"
-        )
-      }
+      if (abs(reaisPerKm - uberApproxPerKm) > tolerance) return DecisionExtraction(null, "rate expected=${format2(uberApproxPerKm)} actual=${format2(reaisPerKm)}")
     }
-
     val semaphore = when {
       reaisPerKm >= GREEN_PER_KM && reaisPerHour >= GREEN_PER_HOUR -> "green"
       reaisPerKm < YELLOW_PER_KM || reaisPerHour < YELLOW_PER_HOUR -> "red"
       else -> "yellow"
     }
-
-    val explicitStop = card.lines.any { STOP_REGEX.containsMatchIn(it.text) }
-    val hasStops = routeLegs.size == 3 || explicitStop
-
-    val signature = listOf(
-      (fare * 100).toInt().toString(),
-      String.format(Locale.US, "%.2f", totalKm),
-      totalMinutes.toString(),
-      hasStops.toString()
-    ).joinToString("|")
-
-    return DecisionExtraction(
-      DecisionOverlayData(
-        fare = fare,
-        totalKm = totalKm,
-        totalMinutes = totalMinutes,
-        reaisPerKm = reaisPerKm,
-        reaisPerHour = reaisPerHour,
-        semaphore = semaphore,
-        hasStops = hasStops,
-        signature = signature
-      ),
-      "ok"
-    )
+    val hasStops = routeLegs.size == 3 || card.lines.any { STOP_REGEX.containsMatchIn(it.text) }
+    val signature = listOf((fare * 100).toInt().toString(), String.format(Locale.US, "%.2f", totalKm), totalMinutes.toString(), hasStops.toString()).joinToString("|")
+    return DecisionExtraction(DecisionOverlayData(fare, totalKm, totalMinutes, reaisPerKm, reaisPerHour, semaphore, hasStops, signature), "ok")
   }
 
   private fun showDecisionOverlay(data: DecisionOverlayData) {
     val now = SystemClock.elapsedRealtime()
-    if (data.signature == lastOverlaySignature && overlayView != null && now - lastOverlayAt <= OVERLAY_DEDUPE_MS) {
-      lastOverlayAt = now
-      refreshOverlayExpiry()
-      return
-    }
-    lastOverlaySignature = data.signature
-    lastOverlayAt = now
-
+    if (data.signature == lastOverlaySignature && overlayView != null && now - lastOverlayAt <= OVERLAY_DEDUPE_MS) { lastOverlayAt = now; refreshOverlayExpiry(); return }
+    lastOverlaySignature = data.signature; lastOverlayAt = now
     overlayHandler.post {
       hideDecisionOverlay()
       val windowManager = getSystemService(WINDOW_SERVICE) as WindowManager
-      val borderColor = when (data.semaphore) {
-        "green" -> Color.rgb(28, 185, 84)
-        "red" -> Color.rgb(234, 67, 53)
-        else -> Color.rgb(251, 188, 4)
-      }
-
+      val borderColor = when (data.semaphore) { "green" -> Color.rgb(28,185,84); "red" -> Color.rgb(234,67,53); else -> Color.rgb(251,188,4) }
       val root = LinearLayout(this).apply {
-        orientation = LinearLayout.VERTICAL
-        setPadding(dp(14), dp(10), dp(14), dp(9))
-        background = GradientDrawable().apply {
-          shape = GradientDrawable.RECTANGLE
-          cornerRadius = dp(14).toFloat()
-          setColor(Color.WHITE)
-          setStroke(dp(5), borderColor)
-        }
-        elevation = dp(10).toFloat()
+        orientation = LinearLayout.VERTICAL; setPadding(dp(14), dp(10), dp(14), dp(9)); elevation = dp(10).toFloat()
+        background = GradientDrawable().apply { shape = GradientDrawable.RECTANGLE; cornerRadius = dp(14).toFloat(); setColor(Color.WHITE); setStroke(dp(5), borderColor) }
       }
-
-      val metricsRow = LinearLayout(this).apply {
-        orientation = LinearLayout.HORIZONTAL
-        gravity = Gravity.CENTER_VERTICAL
-      }
+      val metricsRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
       metricsRow.addView(metricColumn("R$/Km", format2(data.reaisPerKm), borderColor), weightedParams())
       metricsRow.addView(metricColumn("R$/Hora", format2(data.reaisPerHour), borderColor), weightedParams())
-      metricsRow.addView(metricColumn("Sinal", "●", borderColor, true), weightedParams())
-      root.addView(metricsRow)
-
-      val routeSummary = buildString {
-        append(data.totalMinutes).append("min • ")
-        append(format1(data.totalKm)).append("km")
-        if (data.hasStops) append(" • PAR")
-      }
-      root.addView(TextView(this).apply {
-        text = routeSummary
-        setTextColor(Color.rgb(20, 20, 20))
-        textSize = 19f
-        setTypeface(typeface, android.graphics.Typeface.BOLD)
-        setPadding(dp(4), dp(5), dp(4), 0)
-      })
-
+      metricsRow.addView(metricColumn("Sinal", "●", borderColor, true), weightedParams()); root.addView(metricsRow)
+      val routeSummary = buildString { append(data.totalMinutes).append("min • ").append(format1(data.totalKm)).append("km"); if (data.hasStops) append(" • PAR") }
+      root.addView(TextView(this).apply { text = routeSummary; setTextColor(Color.rgb(20,20,20)); textSize = 19f; setTypeface(typeface, android.graphics.Typeface.BOLD); setPadding(dp(4),dp(5),dp(4),0) })
       val width = (resources.displayMetrics.widthPixels * 0.82f).toInt()
-      val params = WindowManager.LayoutParams(
-        width,
-        WindowManager.LayoutParams.WRAP_CONTENT,
-        WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
-        WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
-          WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
-          WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
-        PixelFormat.TRANSLUCENT
-      ).apply {
-        gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
-        y = dp(70)
-      }
-
-      try {
-        windowManager.addView(root, params)
-        overlayView = root
-        scheduleOverlayExpiry()
-      } catch (_: Exception) {
-        overlayView = null
-      }
+      val params = WindowManager.LayoutParams(width, WindowManager.LayoutParams.WRAP_CONTENT, WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
+        WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN, PixelFormat.TRANSLUCENT).apply { gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL; y = dp(70) }
+      try { windowManager.addView(root, params); overlayView = root; scheduleOverlayExpiry() } catch (_: Exception) { overlayView = null }
     }
   }
 
-  private fun scheduleOverlayExpiry() {
-    overlayHideRunnable?.let { overlayHandler.removeCallbacks(it) }
-    val hide = Runnable { hideDecisionOverlay() }
-    overlayHideRunnable = hide
-    overlayHandler.postDelayed(hide, OVERLAY_STALE_MS)
+  private fun scheduleOverlayExpiry() { overlayHideRunnable?.let { overlayHandler.removeCallbacks(it) }; val hide = Runnable { hideDecisionOverlay() }; overlayHideRunnable = hide; overlayHandler.postDelayed(hide, OVERLAY_STALE_MS) }
+  private fun refreshOverlayExpiry() { overlayHandler.post { if (overlayView != null) scheduleOverlayExpiry() } }
+  private fun metricColumn(label: String, value: String, accent: Int, semaphoreDot: Boolean = false): LinearLayout = LinearLayout(this).apply {
+    orientation = LinearLayout.VERTICAL; setPadding(dp(5),0,dp(5),0)
+    addView(TextView(this@RideAccessibilityService).apply { text = label; setTextColor(Color.rgb(110,110,110)); textSize = 13f })
+    addView(TextView(this@RideAccessibilityService).apply { text = value; setTextColor(if (semaphoreDot) accent else Color.BLACK); textSize = if (semaphoreDot) 34f else 27f; setTypeface(typeface, android.graphics.Typeface.BOLD) })
   }
-
-  private fun refreshOverlayExpiry() {
-    overlayHandler.post {
-      if (overlayView != null) scheduleOverlayExpiry()
-    }
-  }
-
-  private fun metricColumn(label: String, value: String, accent: Int, semaphoreDot: Boolean = false): LinearLayout {
-    return LinearLayout(this).apply {
-      orientation = LinearLayout.VERTICAL
-      setPadding(dp(5), 0, dp(5), 0)
-      addView(TextView(this@RideAccessibilityService).apply {
-        text = label
-        setTextColor(Color.rgb(110, 110, 110))
-        textSize = 13f
-      })
-      addView(TextView(this@RideAccessibilityService).apply {
-        text = value
-        setTextColor(if (semaphoreDot) accent else Color.BLACK)
-        textSize = if (semaphoreDot) 34f else 27f
-        setTypeface(typeface, android.graphics.Typeface.BOLD)
-      })
-    }
-  }
-
-  private fun weightedParams(): LinearLayout.LayoutParams {
-    return LinearLayout.LayoutParams(0, WindowManager.LayoutParams.WRAP_CONTENT, 1f)
-  }
-
+  private fun weightedParams(): LinearLayout.LayoutParams = LinearLayout.LayoutParams(0, WindowManager.LayoutParams.WRAP_CONTENT, 1f)
   private fun hideDecisionOverlay() {
-    overlayHideRunnable?.let { overlayHandler.removeCallbacks(it) }
-    overlayHideRunnable = null
-    val current = overlayView ?: return
-    overlayView = null
-    try {
-      val windowManager = getSystemService(WINDOW_SERVICE) as WindowManager
-      windowManager.removeView(current)
-    } catch (_: Exception) {}
+    overlayHideRunnable?.let { overlayHandler.removeCallbacks(it) }; overlayHideRunnable = null
+    val current = overlayView ?: return; overlayView = null
+    try { (getSystemService(WINDOW_SERVICE) as WindowManager).removeView(current) } catch (_: Exception) {}
   }
 
-  private fun persistOcrResult(
-    trigger: CaptureTrigger,
-    uberWindow: UberWindowSignal?,
-    card: OfferCard,
-    width: Int,
-    height: Int
-  ) {
-    val nodes = JSONArray()
-    val seen = HashSet<String>()
-
+  private fun persistOcrResult(trigger: CaptureTrigger, uberWindow: UberWindowSignal?, card: OfferCard, width: Int, height: Int) {
+    val nodes = JSONArray(); val seen = HashSet<String>()
     for (line in card.lines) {
       if (nodes.length() >= MAX_OCR_LINES) break
-      val raw = line.text.trim()
-      if (raw.isBlank() || !isOperational(raw)) continue
-      val normalized = normalize(raw)
-      if (!seen.add(normalized)) continue
-
+      val raw = line.text.trim(); if (raw.isBlank() || !isOperational(raw)) continue
+      if (!seen.add(normalize(raw))) continue
       nodes.put(JSONObject().apply {
-        put("text", raw.take(MAX_LINE_CHARS))
-        put("viewId", JSONObject.NULL)
-        put("className", "OcrLine")
-        put("left", line.bounds.left)
-        put("top", line.bounds.top)
-        put("right", line.bounds.right)
-        put("bottom", line.bounds.bottom)
-        put("clickable", ACTION_REGEX.containsMatchIn(raw))
-        put("origin", "screenshotOcr")
-        put("windowId", uberWindow?.id ?: trigger.windowId)
+        put("text", raw.take(MAX_LINE_CHARS)); put("viewId", JSONObject.NULL); put("className", "OcrLine")
+        put("left", line.bounds.left); put("top", line.bounds.top); put("right", line.bounds.right); put("bottom", line.bounds.bottom)
+        put("clickable", ACTION_REGEX.containsMatchIn(raw)); put("origin", "screenshotOcr"); put("windowId", uberWindow?.id ?: trigger.windowId)
       })
     }
-
-    if (nodes.length() == 0) {
-      persistStatus(trigger, uberWindow, "OCR_PROBE: CURRENT_CARD_NO_OPERATIONAL_TEXT")
-      return
-    }
-
+    if (nodes.length() == 0) { persistStatus(trigger, uberWindow, "OCR_PROBE: CURRENT_CARD_NO_OPERATIONAL_TEXT"); return }
     val now = System.currentTimeMillis()
-    val signature = buildString {
-      for (i in 0 until nodes.length()) append(nodes.optJSONObject(i)?.optString("text", "")).append('|')
-    }.hashCode()
-
+    val signature = buildString { for (i in 0 until nodes.length()) append(nodes.optJSONObject(i)?.optString("text", "")).append('|') }.hashCode()
     val snapshot = JSONObject().apply {
-      put("packageName", UBER_PACKAGE)
-      put("eventType", trigger.eventType)
-      put("capturedAt", now)
-      put("nodeCount", nodes.length())
-      put("nodes", nodes)
-      put("fingerprint", "screenshotOcrCard:$signature")
-      put("truncated", false)
-      put("ocrFrameWidth", width)
-      put("ocrFrameHeight", height)
-      put("targetWindowId", uberWindow?.id ?: JSONObject.NULL)
-      put("targetWindowType", uberWindow?.type ?: JSONObject.NULL)
-      put("targetWindowBounds", uberWindow?.bounds?.let { rectToJson(it) } ?: JSONObject.NULL)
-      put("captureAttempt", trigger.attempt)
-      put("origins", JSONArray().put("screenshotOcr"))
+      put("packageName", UBER_PACKAGE); put("eventType", trigger.eventType); put("capturedAt", now); put("nodeCount", nodes.length()); put("nodes", nodes)
+      put("fingerprint", "screenshotOcrCard:$signature"); put("truncated", false); put("ocrFrameWidth", width); put("ocrFrameHeight", height)
+      put("targetWindowId", uberWindow?.id ?: JSONObject.NULL); put("targetWindowType", uberWindow?.type ?: JSONObject.NULL)
+      put("targetWindowBounds", uberWindow?.bounds?.let { rectToJson(it) } ?: JSONObject.NULL); put("captureAttempt", trigger.attempt); put("origins", JSONArray().put("screenshotOcr"))
     }
-
     try { RideAccessibilityStore.append(applicationContext, snapshot) } catch (_: Exception) {}
   }
 
   private fun persistStatus(trigger: CaptureTrigger, uberWindow: UberWindowSignal?, detail: String) {
-    val diagnosticKey = detail
-      .replace(Regex("""\s+retry=.*$"""), "")
-      .replace(Regex("""\s+code=\d+"""), "")
+    val diagnosticKey = detail.replace(Regex("""\s+retry=.*$"""), "").replace(Regex("""\s+code=\d+"""), "")
     if (!diagnosticLimiter.shouldEmit(diagnosticKey, SystemClock.elapsedRealtime())) return
     val now = System.currentTimeMillis()
     val safeMeta = buildString {
-      append(detail)
-      append(" • attempt=").append(trigger.attempt)
-      if (uberWindow != null) {
-        append(" • uberWindow=").append(uberWindow.id)
-        append(" type=").append(windowTypeName(uberWindow.type))
-        append(" bounds=")
-          .append(uberWindow.bounds.left).append(',')
-          .append(uberWindow.bounds.top).append('-')
-          .append(uberWindow.bounds.right).append(',')
-          .append(uberWindow.bounds.bottom)
-      } else append(" • uberWindow=none")
+      append(detail); append(" • attempt=").append(trigger.attempt)
+      if (uberWindow != null) append(" • uberWindow=").append(uberWindow.id).append(" type=").append(windowTypeName(uberWindow.type)).append(" bounds=")
+        .append(uberWindow.bounds.left).append(',').append(uberWindow.bounds.top).append('-').append(uberWindow.bounds.right).append(',').append(uberWindow.bounds.bottom)
+      else append(" • uberWindow=none")
     }
-
-    val node = JSONObject().apply {
-      put("text", safeMeta.take(MAX_LINE_CHARS * 2))
-      put("viewId", JSONObject.NULL)
-      put("className", "ScreenshotOcrProbe")
-      put("left", 0)
-      put("top", 0)
-      put("right", 0)
-      put("bottom", 0)
-      put("clickable", false)
-      put("origin", "screenshotOcr")
-      put("windowId", uberWindow?.id ?: trigger.windowId)
-    }
-
-    val snapshot = JSONObject().apply {
-      put("packageName", UBER_PACKAGE)
-      put("eventType", trigger.eventType)
-      put("capturedAt", now)
-      put("nodeCount", 1)
-      put("nodes", JSONArray().put(node))
-      put("fingerprint", "screenshotOcrStatus:${safeMeta.hashCode()}:$now")
-      put("truncated", false)
-      put("origins", JSONArray().put("screenshotOcr"))
-    }
-
+    val node = JSONObject().apply { put("text", safeMeta.take(MAX_LINE_CHARS * 2)); put("viewId", JSONObject.NULL); put("className", "ScreenshotOcrProbe"); put("left",0); put("top",0); put("right",0); put("bottom",0); put("clickable",false); put("origin","screenshotOcr"); put("windowId",uberWindow?.id ?: trigger.windowId) }
+    val snapshot = JSONObject().apply { put("packageName", UBER_PACKAGE); put("eventType", trigger.eventType); put("capturedAt", now); put("nodeCount",1); put("nodes",JSONArray().put(node)); put("fingerprint","screenshotOcrStatus:${safeMeta.hashCode()}:$now"); put("truncated",false); put("origins",JSONArray().put("screenshotOcr")) }
     try { RideAccessibilityStore.append(applicationContext, snapshot) } catch (_: Exception) {}
   }
 
-  private fun centerY(rect: Rect): Int = rect.top + (rect.height() / 2)
-
+  private fun centerY(rect: Rect): Int = rect.top + rect.height() / 2
   private fun parseDecimal(value: String): Double? {
-    val cleaned = value.trim().replace(" ", "")
-    if (cleaned.isBlank()) return null
-    return when {
-      cleaned.contains(',') -> cleaned.replace(".", "").replace(',', '.').toDoubleOrNull()
-      else -> cleaned.toDoubleOrNull()
-    }
+    val cleaned = value.trim().replace(" ", ""); if (cleaned.isBlank()) return null
+    return if (cleaned.contains(',')) cleaned.replace(".", "").replace(',', '.').toDoubleOrNull() else cleaned.toDoubleOrNull()
   }
-
-  private fun rectToJson(rect: Rect): JSONObject {
-    return JSONObject().apply {
-      put("left", rect.left)
-      put("top", rect.top)
-      put("right", rect.right)
-      put("bottom", rect.bottom)
-    }
+  private fun rectToJson(rect: Rect): JSONObject = JSONObject().apply { put("left",rect.left); put("top",rect.top); put("right",rect.right); put("bottom",rect.bottom) }
+  private fun windowTypeName(type: Int): String = when (type) {
+    AccessibilityWindowInfo.TYPE_APPLICATION -> "APPLICATION"
+    AccessibilityWindowInfo.TYPE_SYSTEM -> "SYSTEM"
+    AccessibilityWindowInfo.TYPE_INPUT_METHOD -> "INPUT_METHOD"
+    AccessibilityWindowInfo.TYPE_ACCESSIBILITY_OVERLAY -> "ACCESSIBILITY_OVERLAY"
+    else -> type.toString()
   }
-
-  private fun windowTypeName(type: Int): String {
-    return when (type) {
-      AccessibilityWindowInfo.TYPE_APPLICATION -> "APPLICATION"
-      AccessibilityWindowInfo.TYPE_SYSTEM -> "SYSTEM"
-      AccessibilityWindowInfo.TYPE_INPUT_METHOD -> "INPUT_METHOD"
-      AccessibilityWindowInfo.TYPE_ACCESSIBILITY_OVERLAY -> "ACCESSIBILITY_OVERLAY"
-      else -> type.toString()
-    }
-  }
-
-  private fun isOperational(value: String): Boolean {
-    return OPERATIONAL_PATTERNS.any { it.containsMatchIn(value) }
-  }
-
-  private fun normalize(value: String): String {
-    return value.lowercase().replace(Regex("""\s+"""), " ").trim()
-  }
-
-  private fun format1(value: Double): String {
-    return String.format(Locale.US, "%.1f", value).replace('.', ',')
-  }
-
-  private fun format2(value: Double): String {
-    return String.format(Locale.US, "%.2f", value).replace('.', ',')
-  }
-
+  private fun isOperational(value: String): Boolean = OPERATIONAL_PATTERNS.any { it.containsMatchIn(value) }
+  private fun normalize(value: String): String = value.lowercase().replace(Regex("""\s+"""), " ").trim()
+  private fun format1(value: Double): String = String.format(Locale.US, "%.1f", value).replace('.', ',')
+  private fun format2(value: Double): String = String.format(Locale.US, "%.2f", value).replace('.', ',')
   private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()
-
   private fun mapError(code: Int): String {
     if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return "UNSUPPORTED_API"
     return when (code) {
