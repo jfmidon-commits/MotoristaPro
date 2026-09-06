@@ -58,6 +58,12 @@ jobs:
           </resources>
           EOF
 
+      - name: Native capture stability tests
+        working-directory: android
+        env:
+          NODE_ENV: production
+        run: ./gradlew :motorista-notification-listener:testReleaseUnitTest --no-daemon
+
       - name: Build standalone APK
         working-directory: android
         env:

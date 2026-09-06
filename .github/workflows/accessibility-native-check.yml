@@ -51,6 +51,10 @@ jobs:
           </resources>
           EOF
 
+      - name: Native capture stability tests
+        working-directory: android
+        run: ./gradlew :motorista-notification-listener:testReleaseUnitTest --no-daemon
+
       - name: Compile Kotlin only
         working-directory: android
         env:
