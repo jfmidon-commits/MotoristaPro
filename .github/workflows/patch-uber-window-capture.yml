@@ -7,89 +7,35 @@ on:
 
 jobs:
   patch:
-    if: "!contains(github.event.head_commit.message, '[skip ci]')"
+    if: ${{ !contains(github.event.head_commit.message, '[skip ci]') }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
       - uses: actions/checkout@v4
-      - name: Patch Uber screenshot capture and card detection
-        env:
-          FILE: modules/motorista-notification-listener/android/src/main/java/expo/modules/motoristanotificationlistener/RideAccessibilityService.kt
+      - name: Patch Uber screenshot capture
         run: |
           python3 - <<'PY'
           from pathlib import Path
-          p = Path("modules/motorista-notification-listener/android/src/main/java/expo/modules/motoristanotificationlistener/RideAccessibilityService.kt")
+          p = Path('modules/motorista-notification-listener/android/src/main/java/expo/modules/motoristanotificationlistener/RideAccessibilityService.kt')
           s = p.read_text()
-          old = 'private val ACTION_REGEX = Regex("""\\b(?:Aceitar|Selecionar)\\b""", RegexOption.IGNORE_CASE)'
-          new = 'private val ACTION_REGEX = Regex("""\\b(?:Aceitar|Aceite|Selecionar|Recusar|Deslize|Confirmar)\\b""", RegexOption.IGNORE_CASE)'
+          s = s.replace('private val ACTION_REGEX = Regex("""\\b(?:Aceitar|Selecionar)\\b""", RegexOption.IGNORE_CASE)', 'private val ACTION_REGEX = Regex("""\\b(?:Aceitar|Aceite|Selecionar|Recusar|Deslize|Confirmar)\\b""", RegexOption.IGNORE_CASE)', 1)
+          s = s.replace('      takeScreenshot(Display.DEFAULT_DISPLAY, mainExecutor, object : TakeScreenshotCallback {', '      val screenshotCallback = object : TakeScreenshotCallback {', 1)
+          s = s.replace('      })\n    } catch (_: SecurityException) {', '      }\n      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE && uberWindow != null) {\n        try {\n          takeScreenshotOfWindow(uberWindow.id, mainExecutor, screenshotCallback)\n        } catch (_: Exception) {\n          takeScreenshot(Display.DEFAULT_DISPLAY, mainExecutor, screenshotCallback)\n        }\n      } else {\n        takeScreenshot(Display.DEFAULT_DISPLAY, mainExecutor, screenshotCallback)\n      }\n    } catch (_: SecurityException) {', 1)
+          old = '    val actionLine = allLines.filter { ACTION_REGEX.containsMatchIn(it.text) }.maxByOrNull { centerY(it.bounds) } ?: return null\n    val eligibleFares = allLines.filter { line ->\n      if (line.bounds.bottom >= actionLine.bounds.top) return@filter false\n      val normalized = normalize(line.text)\n      if (normalized.contains("/km") || normalized.contains("aprox") || normalized.contains("incluido") || normalized.contains("incluído") || normalized.trimStart().startsWith("+")) return@filter false\n      FARE_REGEX.containsMatchIn(line.text)\n    }\n    if (eligibleFares.isEmpty()) return null\n    val mainFare = eligibleFares.maxWithOrNull(compareBy<OcrLineRecord> { it.bounds.height() }.thenBy { it.bounds.width() }.thenBy { centerY(it.bounds) }) ?: return null\n    if (actionLine.bounds.top <= mainFare.bounds.bottom) return null\n'
+          new = '    val detectedActionLine = allLines.filter { ACTION_REGEX.containsMatchIn(it.text) }.maxByOrNull { centerY(it.bounds) }\n    val actionLine = detectedActionLine ?: allLines.maxByOrNull { it.bounds.bottom } ?: return null\n    val eligibleFares = allLines.filter { line ->\n      if (detectedActionLine != null && line.bounds.bottom >= detectedActionLine.bounds.top) return@filter false\n      val normalized = normalize(line.text)\n      if (normalized.contains("/km") || normalized.contains("aprox") || normalized.contains("incluido") || normalized.contains("incluído") || normalized.trimStart().startsWith("+")) return@filter false\n      FARE_REGEX.containsMatchIn(line.text)\n    }\n    if (eligibleFares.isEmpty()) return null\n    val mainFare = eligibleFares.maxWithOrNull(compareBy<OcrLineRecord> { it.bounds.height() }.thenBy { it.bounds.width() }.thenBy { centerY(it.bounds) }) ?: return null\n    if (actionLine.bounds.top <= mainFare.bounds.bottom && detectedActionLine != null) return null\n    val inferredBottom = if (detectedActionLine != null) actionLine.bounds.bottom else (mainFare.bounds.bottom + dp(900)).coerceAtMost(resources.displayMetrics.heightPixels)\n'
           if old not in s:
-              raise SystemExit("ACTION_REGEX target not found")
+              raise SystemExit('card detection target not found')
           s = s.replace(old, new, 1)
-          old_call = '      takeScreenshot(Display.DEFAULT_DISPLAY, mainExecutor, object : TakeScreenshotCallback {'
-          new_call = '''      val screenshotCallback = object : TakeScreenshotCallback {'''
-          if old_call not in s:
-              raise SystemExit("screenshot call target not found")
-          s = s.replace(old_call, new_call, 1)
-          old_close = '''      })
-    } catch (_: SecurityException) {'''
-          new_close = '''      }
-      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE && uberWindow != null) {
-        try {
-          takeScreenshotOfWindow(uberWindow.id, mainExecutor, screenshotCallback)
-        } catch (_: Exception) {
-          takeScreenshot(Display.DEFAULT_DISPLAY, mainExecutor, screenshotCallback)
-        }
-      } else {
-        takeScreenshot(Display.DEFAULT_DISPLAY, mainExecutor, screenshotCallback)
-      }
-    } catch (_: SecurityException) {'''
-          if old_close not in s:
-              raise SystemExit("screenshot callback close target not found")
-          s = s.replace(old_close, new_close, 1)
-          old_card = '''    val actionLine = allLines.filter { ACTION_REGEX.containsMatchIn(it.text) }.maxByOrNull { centerY(it.bounds) } ?: return null
-    val eligibleFares = allLines.filter { line ->
-      if (line.bounds.bottom >= actionLine.bounds.top) return@filter false
-      val normalized = normalize(line.text)
-      if (normalized.contains("/km") || normalized.contains("aprox") || normalized.contains("incluido") || normalized.contains("incluído") || normalized.trimStart().startsWith("+")) return@filter false
-      FARE_REGEX.containsMatchIn(line.text)
-    }
-    if (eligibleFares.isEmpty()) return null
-    val mainFare = eligibleFares.maxWithOrNull(compareBy<OcrLineRecord> { it.bounds.height() }.thenBy { it.bounds.width() }.thenBy { centerY(it.bounds) }) ?: return null
-    if (actionLine.bounds.top <= mainFare.bounds.bottom) return null
-'''
-          new_card = '''    val detectedActionLine = allLines.filter { ACTION_REGEX.containsMatchIn(it.text) }.maxByOrNull { centerY(it.bounds) }
-    val actionLine = detectedActionLine
-      ?: allLines.maxByOrNull { it.bounds.bottom }
-      ?: return null
-    val eligibleFares = allLines.filter { line ->
-      if (detectedActionLine != null && line.bounds.bottom >= detectedActionLine.bounds.top) return@filter false
-      val normalized = normalize(line.text)
-      if (normalized.contains("/km") || normalized.contains("aprox") || normalized.contains("incluido") || normalized.contains("incluído") || normalized.trimStart().startsWith("+")) return@filter false
-      FARE_REGEX.containsMatchIn(line.text)
-    }
-    if (eligibleFares.isEmpty()) return null
-    val mainFare = eligibleFares.maxWithOrNull(compareBy<OcrLineRecord> { it.bounds.height() }.thenBy { it.bounds.width() }.thenBy { centerY(it.bounds) }) ?: return null
-    if (actionLine.bounds.top <= mainFare.bounds.bottom && detectedActionLine != null) return null
-    val inferredBottom = if (detectedActionLine != null) actionLine.bounds.bottom else (mainFare.bounds.bottom + dp(900)).coerceAtMost(resources.displayMetrics.heightPixels)
-'''
-          if old_card not in s:
-              raise SystemExit("card detection target not found")
-          s = s.replace(old_card, new_card, 1)
-          old_bottom = '    val cardBottom = actionLine.bounds.bottom + dp(20)'
-          new_bottom = '    val cardBottom = if (detectedActionLine != null) actionLine.bounds.bottom + dp(20) else inferredBottom'
-          if old_bottom not in s:
-              raise SystemExit("card bottom target not found")
-          s = s.replace(old_bottom, new_bottom, 1)
+          s = s.replace('    val cardBottom = actionLine.bounds.bottom + dp(20)', '    val cardBottom = if (detectedActionLine != null) actionLine.bounds.bottom + dp(20) else inferredBottom', 1)
           p.write_text(s)
           PY
           git diff --check
-          git diff -- "$FILE"
       - name: Commit source patch and remove temporary workflow
         run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add modules/motorista-notification-listener/android/src/main/java/expo/modules/motoristanotificationlistener/RideAccessibilityService.kt
           git rm .github/workflows/patch-uber-window-capture.yml
-          git commit -m "fix(android): capture Uber window directly for OCR [skip ci]"
+          git commit -m 'fix(android): capture Uber window directly for OCR [skip ci]'
           git push
