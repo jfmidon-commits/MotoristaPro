@@ -7,6 +7,8 @@ import type { NormalizedRideOffer } from "@/services/RideOfferNormalizer";
 import { estimateRideProfit } from "@/services/ProfitEngine";
 import { decideRide, type DecisionThresholds } from "@/services/DecisionEngine";
 
+const OFFER_DEDUPE_WINDOW_MS = 90_000;
+
 export interface AddRideOfferParams {
   userId: string;
   vehicleId?: string | null;
@@ -17,7 +19,74 @@ export interface AddRideOfferParams {
   thresholds: DecisionThresholds;
 }
 
+function offerSignatureWhere(offer: NormalizedRideOffer): {
+  sql: string;
+  params: Array<string | number | null>;
+} {
+  const capturedAt = Date.parse(offer.capturedAtIso);
+  const safeCapturedAt = Number.isFinite(capturedAt) ? capturedAt : Date.now();
+  const lowerBound = new Date(safeCapturedAt - OFFER_DEDUPE_WINDOW_MS).toISOString();
+  const upperBound = new Date(safeCapturedAt + OFFER_DEDUPE_WINDOW_MS).toISOString();
+
+  return {
+    sql: `
+      SELECT * FROM ride_offers
+      WHERE user_id = ?
+        AND platform = ?
+        AND offered_amount = ?
+        AND additional_pay = ?
+        AND (
+          (category = ?)
+          OR (category IS NULL AND ? IS NULL)
+        )
+        AND (
+          (total_expected_distance_km IS NULL AND ? IS NULL)
+          OR ABS(total_expected_distance_km - ?) < 0.01
+        )
+        AND (
+          (total_expected_duration_minutes IS NULL AND ? IS NULL)
+          OR ABS(total_expected_duration_minutes - ?) < 0.5
+        )
+        AND captured_at >= ?
+        AND captured_at <= ?
+      ORDER BY captured_at DESC, created_at DESC
+      LIMIT 1
+    `,
+    params: [
+      "__USER__",
+      offer.platform,
+      offer.offeredAmountCents,
+      offer.additionalPayCents,
+      offer.category,
+      offer.category,
+      offer.totalExpectedDistanceKm,
+      offer.totalExpectedDistanceKm,
+      offer.totalExpectedDurationMinutes,
+      offer.totalExpectedDurationMinutes,
+      lowerBound,
+      upperBound
+    ]
+  };
+}
+
+async function findRecentDuplicateRideOffer(
+  userId: string,
+  offer: NormalizedRideOffer
+): Promise<RideOffer | null> {
+  const db = await getDb();
+  const where = offerSignatureWhere(offer);
+  const params = [...where.params];
+  params[0] = userId;
+  const row = await db.getFirstAsync<RideOffer>(where.sql, params);
+  return row ?? null;
+}
+
 export async function addRideOffer(params: AddRideOfferParams): Promise<RideOffer> {
+  const duplicate = await findRecentDuplicateRideOffer(params.userId, params.offer);
+  if (duplicate) {
+    return duplicate;
+  }
+
   const db = await getDb();
   const grossAmountCents = params.offer.offeredAmountCents + params.offer.additionalPayCents;
   const profit = estimateRideProfit({
@@ -123,7 +192,7 @@ export async function syncRideOffer(rideOffer: RideOffer): Promise<void> {
 
 async function markRideOfferSyncState(id: string, state: RideOffer["sync_state"], error: string | null) {
   const db = await getDb();
-  await db.runAsync(`UPDATE ride_offers SET sync_state = ?, sync_error = ? WHERE id = ?`, [state, error, id]);
+  await db.runAsync(`UPDATE ride_offers SET sync_state = ?, sync_error = ? WHERE id = ?`, [id, state, error]);
 }
 
 export async function getPendingRideOffers(userId: string): Promise<RideOffer[]> {
