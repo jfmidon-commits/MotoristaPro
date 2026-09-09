@@ -19,10 +19,7 @@ export interface AddRideOfferParams {
   thresholds: DecisionThresholds;
 }
 
-function offerSignatureWhere(offer: NormalizedRideOffer): {
-  sql: string;
-  params: Array<string | number | null>;
-} {
+function offerSignatureWhere(offer: NormalizedRideOffer): { sql: string; params: Array<string | number | null> } {
   const capturedAt = Date.parse(offer.capturedAtIso);
   const safeCapturedAt = Number.isFinite(capturedAt) ? capturedAt : Date.now();
   const lowerBound = new Date(safeCapturedAt - OFFER_DEDUPE_WINDOW_MS).toISOString();
@@ -35,18 +32,9 @@ function offerSignatureWhere(offer: NormalizedRideOffer): {
         AND platform = ?
         AND offered_amount = ?
         AND additional_pay = ?
-        AND (
-          (category = ?)
-          OR (category IS NULL AND ? IS NULL)
-        )
-        AND (
-          (total_expected_distance_km IS NULL AND ? IS NULL)
-          OR ABS(total_expected_distance_km - ?) < 0.01
-        )
-        AND (
-          (total_expected_duration_minutes IS NULL AND ? IS NULL)
-          OR ABS(total_expected_duration_minutes - ?) < 0.5
-        )
+        AND ((category = ?) OR (category IS NULL AND ? IS NULL))
+        AND ((total_expected_distance_km IS NULL AND ? IS NULL) OR ABS(total_expected_distance_km - ?) < 0.01)
+        AND ((total_expected_duration_minutes IS NULL AND ? IS NULL) OR ABS(total_expected_duration_minutes - ?) < 0.5)
         AND captured_at >= ?
         AND captured_at <= ?
       ORDER BY captured_at DESC, created_at DESC
@@ -69,10 +57,7 @@ function offerSignatureWhere(offer: NormalizedRideOffer): {
   };
 }
 
-async function findRecentDuplicateRideOffer(
-  userId: string,
-  offer: NormalizedRideOffer
-): Promise<RideOffer | null> {
+async function findRecentDuplicateRideOffer(userId: string, offer: NormalizedRideOffer): Promise<RideOffer | null> {
   const db = await getDb();
   const where = offerSignatureWhere(offer);
   const params = [...where.params];
@@ -83,9 +68,7 @@ async function findRecentDuplicateRideOffer(
 
 export async function addRideOffer(params: AddRideOfferParams): Promise<RideOffer> {
   const duplicate = await findRecentDuplicateRideOffer(params.userId, params.offer);
-  if (duplicate) {
-    return duplicate;
-  }
+  if (duplicate) return duplicate;
 
   const db = await getDb();
   const grossAmountCents = params.offer.offeredAmountCents + params.offer.additionalPayCents;
@@ -100,37 +83,21 @@ export async function addRideOffer(params: AddRideOfferParams): Promise<RideOffe
   const now = new Date().toISOString();
 
   const rideOffer: RideOffer = {
-    id: uuidv4(),
-    user_id: params.userId,
-    vehicle_id: params.vehicleId ?? null,
-    work_session_id: params.workSessionId ?? null,
-    platform: params.offer.platform,
-    category: params.offer.category,
-    captured_at: params.offer.capturedAtIso,
-    offered_amount: params.offer.offeredAmountCents,
-    pickup_distance_km: params.offer.pickupDistanceKm,
-    pickup_duration_minutes: params.offer.pickupDurationMinutes,
-    trip_distance_km: params.offer.tripDistanceKm,
-    trip_duration_minutes: params.offer.tripDurationMinutes,
-    total_expected_distance_km: params.offer.totalExpectedDistanceKm,
+    id: uuidv4(), user_id: params.userId, vehicle_id: params.vehicleId ?? null,
+    work_session_id: params.workSessionId ?? null, platform: params.offer.platform,
+    category: params.offer.category, captured_at: params.offer.capturedAtIso,
+    offered_amount: params.offer.offeredAmountCents, pickup_distance_km: params.offer.pickupDistanceKm,
+    pickup_duration_minutes: params.offer.pickupDurationMinutes, trip_distance_km: params.offer.tripDistanceKm,
+    trip_duration_minutes: params.offer.tripDurationMinutes, total_expected_distance_km: params.offer.totalExpectedDistanceKm,
     total_expected_duration_minutes: params.offer.totalExpectedDurationMinutes,
-    approximate_origin_zone: params.offer.approximateOriginZone,
-    approximate_destination_zone: params.offer.approximateDestinationZone,
-    additional_pay: params.offer.additionalPayCents,
-    capture_source: params.offer.captureSource,
-    extraction_confidence: params.offer.extractionConfidence,
-    estimated_cost: profit.estimatedCostCents,
-    expected_net_profit: profit.expectedNetProfitCents,
-    expected_net_per_km: profit.netPerKmCents,
-    expected_net_per_hour: profit.netPerHourCents,
-    decision_label: decision.label,
-    decision_score: decision.score,
+    approximate_origin_zone: params.offer.approximateOriginZone, approximate_destination_zone: params.offer.approximateDestinationZone,
+    additional_pay: params.offer.additionalPayCents, capture_source: params.offer.captureSource,
+    extraction_confidence: params.offer.extractionConfidence, estimated_cost: profit.estimatedCostCents,
+    expected_net_profit: profit.expectedNetProfitCents, expected_net_per_km: profit.netPerKmCents,
+    expected_net_per_hour: profit.netPerHourCents, decision_label: decision.label, decision_score: decision.score,
     decision_reasons_positive_json: JSON.stringify(decision.reasonsPositive),
-    decision_reasons_negative_json: JSON.stringify(decision.reasonsNegative),
-    decision_confidence: decision.confidence,
-    created_at: now,
-    sync_state: "pending",
-    sync_error: null
+    decision_reasons_negative_json: JSON.stringify(decision.reasonsNegative), decision_confidence: decision.confidence,
+    created_at: now, sync_state: "pending", sync_error: null
   };
 
   await db.runAsync(
@@ -143,8 +110,7 @@ export async function addRideOffer(params: AddRideOfferParams): Promise<RideOffe
        decision_label, decision_score, decision_reasons_positive_json,
        decision_reasons_negative_json, decision_confidence, created_at, sync_state, sync_error)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    [
-      rideOffer.id, rideOffer.user_id, rideOffer.vehicle_id, rideOffer.work_session_id,
+    [rideOffer.id, rideOffer.user_id, rideOffer.vehicle_id, rideOffer.work_session_id,
       rideOffer.platform, rideOffer.category, rideOffer.captured_at, rideOffer.offered_amount,
       rideOffer.pickup_distance_km, rideOffer.pickup_duration_minutes, rideOffer.trip_distance_km,
       rideOffer.trip_duration_minutes, rideOffer.total_expected_distance_km,
@@ -154,8 +120,7 @@ export async function addRideOffer(params: AddRideOfferParams): Promise<RideOffe
       rideOffer.expected_net_per_km, rideOffer.expected_net_per_hour, rideOffer.decision_label,
       rideOffer.decision_score, rideOffer.decision_reasons_positive_json,
       rideOffer.decision_reasons_negative_json, rideOffer.decision_confidence,
-      rideOffer.created_at, rideOffer.sync_state, rideOffer.sync_error
-    ]
+      rideOffer.created_at, rideOffer.sync_state, rideOffer.sync_error]
   );
 
   await syncRideOffer(rideOffer);
@@ -180,11 +145,7 @@ export async function syncRideOffer(rideOffer: RideOffer): Promise<void> {
   const { data: confirmRow, error: selectError } = await supabase
     .from("ride_offers").select("id").eq("id", rideOffer.id).maybeSingle();
   if (selectError || !confirmRow) {
-    await markRideOfferSyncState(
-      rideOffer.id,
-      "error",
-      selectError?.message ?? "Oferta não encontrada após sincronização"
-    );
+    await markRideOfferSyncState(rideOffer.id, "error", selectError?.message ?? "Oferta não encontrada após sincronização");
     return;
   }
   await markRideOfferSyncState(rideOffer.id, "synced", null);
@@ -192,7 +153,7 @@ export async function syncRideOffer(rideOffer: RideOffer): Promise<void> {
 
 async function markRideOfferSyncState(id: string, state: RideOffer["sync_state"], error: string | null) {
   const db = await getDb();
-  await db.runAsync(`UPDATE ride_offers SET sync_state = ?, sync_error = ? WHERE id = ?`, [id, state, error]);
+  await db.runAsync(`UPDATE ride_offers SET sync_state = ?, sync_error = ? WHERE id = ?`, [state, error, id]);
 }
 
 export async function getPendingRideOffers(userId: string): Promise<RideOffer[]> {
@@ -202,20 +163,14 @@ export async function getPendingRideOffers(userId: string): Promise<RideOffer[]>
      WHERE ro.user_id = ? AND ro.sync_state != 'synced'
        AND NOT EXISTS (
          SELECT 1 FROM pending_deletes pd
-         WHERE pd.user_id = ro.user_id
-           AND pd.table_name = 'ride_offers'
-           AND pd.record_id = ro.id
+         WHERE pd.user_id = ro.user_id AND pd.table_name = 'ride_offers' AND pd.record_id = ro.id
        )
-     ORDER BY ro.created_at ASC`,
-    [userId]
+     ORDER BY ro.created_at ASC`, [userId]
   );
 }
 
 export async function getRideOfferById(userId: string, id: string): Promise<RideOffer | null> {
   const db = await getDb();
-  const row = await db.getFirstAsync<RideOffer>(
-    `SELECT * FROM ride_offers WHERE user_id = ? AND id = ? LIMIT 1`,
-    [userId, id]
-  );
+  const row = await db.getFirstAsync<RideOffer>(`SELECT * FROM ride_offers WHERE user_id = ? AND id = ? LIMIT 1`, [userId, id]);
   return row ?? null;
 }
