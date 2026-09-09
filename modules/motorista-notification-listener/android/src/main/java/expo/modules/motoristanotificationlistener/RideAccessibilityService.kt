@@ -79,7 +79,7 @@ class RideAccessibilityService : AccessibilityService() {
       """(?:R\$|RS|R5)?\s*([0-9]{1,3}(?:[.,][0-9]{1,2})?)\s*/\s*km""",
       RegexOption.IGNORE_CASE
     )
-    private val ACTION_REGEX = Regex("""\b(?:Aceitar|Selecionar)\b""", RegexOption.IGNORE_CASE)
+    private val ACTION_REGEX = Regex("""\b(?:Aceitar|Aceite|Selecionar|Recusar|Deslize|Confirmar)\b""", RegexOption.IGNORE_CASE)
     private val STOP_REGEX = Regex("""\bparada(?:s)?\b""", RegexOption.IGNORE_CASE)
     private val OPERATIONAL_PATTERNS = listOf(
       Regex("""(?:R\$|RS|R5)\s*[+]?\s*[0-9]{1,5}(?:[.,][0-9]{1,3})?""", RegexOption.IGNORE_CASE),
@@ -281,7 +281,7 @@ class RideAccessibilityService : AccessibilityService() {
 
   private fun takeDisplayScreenshot(trigger: CaptureTrigger, uberWindow: UberWindowSignal?, lease: CaptureLease) {
     try {
-      takeScreenshot(Display.DEFAULT_DISPLAY, mainExecutor, object : TakeScreenshotCallback {
+      val screenshotCallback = object : TakeScreenshotCallback {
         override fun onSuccess(screenshot: ScreenshotResult) {
           val buffer = screenshot.hardwareBuffer
           var hardwareBitmap: Bitmap? = null
@@ -314,7 +314,16 @@ class RideAccessibilityService : AccessibilityService() {
             retryOrDefer(trigger, if (errorCode == ERROR_TAKE_SCREENSHOT_INTERVAL_TIME_SHORT) 800L else null)
           }
         }
-      })
+      }
+      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE && uberWindow != null) {
+        try {
+          takeScreenshotOfWindow(uberWindow.id, mainExecutor, screenshotCallback)
+        } catch (_: Exception) {
+          takeScreenshot(Display.DEFAULT_DISPLAY, mainExecutor, screenshotCallback)
+        }
+      } else {
+        takeScreenshot(Display.DEFAULT_DISPLAY, mainExecutor, screenshotCallback)
+      }
     } catch (_: SecurityException) {
       persistStatus(trigger, uberWindow, "OCR_PROBE: SECURITY_EXCEPTION")
       finishLease(lease)
@@ -419,22 +428,24 @@ class RideAccessibilityService : AccessibilityService() {
       if (text.isNotBlank()) allLines.add(OcrLineRecord(text, Rect(bounds)))
     }
     if (allLines.isEmpty()) return null
-    val actionLine = allLines.filter { ACTION_REGEX.containsMatchIn(it.text) }.maxByOrNull { centerY(it.bounds) } ?: return null
+    val detectedActionLine = allLines.filter { ACTION_REGEX.containsMatchIn(it.text) }.maxByOrNull { centerY(it.bounds) }
+    val actionLine = detectedActionLine ?: allLines.maxByOrNull { it.bounds.bottom } ?: return null
     val eligibleFares = allLines.filter { line ->
-      if (line.bounds.bottom >= actionLine.bounds.top) return@filter false
+      if (detectedActionLine != null && line.bounds.bottom >= detectedActionLine.bounds.top) return@filter false
       val normalized = normalize(line.text)
       if (normalized.contains("/km") || normalized.contains("aprox") || normalized.contains("incluido") || normalized.contains("incluído") || normalized.trimStart().startsWith("+")) return@filter false
       FARE_REGEX.containsMatchIn(line.text)
     }
     if (eligibleFares.isEmpty()) return null
     val mainFare = eligibleFares.maxWithOrNull(compareBy<OcrLineRecord> { it.bounds.height() }.thenBy { it.bounds.width() }.thenBy { centerY(it.bounds) }) ?: return null
-    if (actionLine.bounds.top <= mainFare.bounds.bottom) return null
+    if (actionLine.bounds.top <= mainFare.bounds.bottom && detectedActionLine != null) return null
+    val inferredBottom = if (detectedActionLine != null) actionLine.bounds.bottom else (mainFare.bounds.bottom + dp(900)).coerceAtMost(resources.displayMetrics.heightPixels)
     val horizontalPad = dp(50)
     val actionCenterX = actionLine.bounds.left + actionLine.bounds.width() / 2
     val cardLeft = (actionCenterX - resources.displayMetrics.widthPixels * 0.50).toInt().coerceAtLeast(0)
     val cardRight = (actionCenterX + resources.displayMetrics.widthPixels * 0.50).toInt().coerceAtMost(resources.displayMetrics.widthPixels)
     val cardTop = (mainFare.bounds.top - dp(130)).coerceAtLeast(0)
-    val cardBottom = actionLine.bounds.bottom + dp(20)
+    val cardBottom = if (detectedActionLine != null) actionLine.bounds.bottom + dp(20) else inferredBottom
     val cardLines = allLines.filter {
       val cy = centerY(it.bounds); val cx = it.bounds.left + it.bounds.width() / 2
       cy in cardTop..cardBottom && cx in (cardLeft - horizontalPad)..(cardRight + horizontalPad)
