@@ -1,0 +1,85 @@
+name: Apply capture lease recovery
+
+on:
+  push:
+    branches:
+      - experiment/ride-accessibility-screenshot-ocr
+
+jobs:
+  patch:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: experiment/ride-accessibility-screenshot-ocr
+
+      - name: Patch stale local lease recovery
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('modules/motorista-notification-listener/android/src/main/java/expo/modules/motoristanotificationlistener/RideAccessibilityService.kt')
+          s = p.read_text()
+          old = '''      try {
+        val window = findBestUberWindow()
+        val now = SystemClock.elapsedRealtime()
+        if (
+          isOfferSizedUberWindow(window) &&
+          now >= nextEventCaptureAtElapsed &&
+          retryRunnable == null &&
+          activeLease == null
+        ) {'''
+          new = '''      try {
+        recoverStaleLocalLease()
+        val window = findBestUberWindow()
+        val now = SystemClock.elapsedRealtime()
+        if (
+          isOfferSizedUberWindow(window) &&
+          now >= nextEventCaptureAtElapsed &&
+          retryRunnable == null &&
+          activeLease == null
+        ) {'''
+          if old not in s:
+              raise SystemExit('watchdog block not found')
+          s = s.replace(old, new, 1)
+          marker = '''  private fun isRelevantEventType(eventType: Int): Boolean =
+'''
+          helper = '''  /**
+   * A screenshot callback can disappear at the Android framework boundary.
+   * The process-wide governor expires that lease, but the service-local
+   * reference would otherwise remain non-null forever and disable its own
+   * foreground watchdog. Clear only when the token is no longer active.
+   */
+  private fun recoverStaleLocalLease() {
+    val lease = activeLease ?: return
+    if (!ScreenshotCaptureCoordinator.isActive(lease)) {
+      activeLease = null
+    }
+  }
+
+'''
+          if marker not in s:
+              raise SystemExit('helper marker not found')
+          s = s.replace(marker, helper + marker, 1)
+          p.write_text(s)
+          PY
+
+      - name: Validate patch
+        run: |
+          grep -n "recoverStaleLocalLease" modules/motorista-notification-listener/android/src/main/java/expo/modules/motoristanotificationlistener/RideAccessibilityService.kt
+          git diff --check
+
+      - name: Commit source patch and remove temporary workflow
+        shell: bash
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add modules/motorista-notification-listener/android/src/main/java/expo/modules/motoristanotificationlistener/RideAccessibilityService.kt .github/workflows/patch-capture-lease-recovery.yml
+          git commit -m 'fix(android): recover stale local screenshot lease'
+          git rm .github/workflows/patch-capture-lease-recovery.yml
+          git commit -m 'chore: remove temporary capture lease patch workflow'
+          git push origin HEAD:experiment/ride-accessibility-screenshot-ocr
