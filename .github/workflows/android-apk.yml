@@ -2,6 +2,9 @@ name: Android APK
 
 on:
   workflow_dispatch:
+  pull_request:
+    branches:
+      - main
   push:
     branches:
       - stabilize/offline-sync
@@ -30,9 +33,11 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.ref || github.ref }}
 
       - name: Apply stale local screenshot lease recovery
-        if: github.ref == 'refs/heads/experiment/ride-accessibility-screenshot-ocr'
+        if: github.ref == 'refs/heads/experiment/ride-accessibility-screenshot-ocr' || github.event.pull_request.head.ref == 'experiment/ride-accessibility-screenshot-ocr'
         shell: bash
         run: |
           python3 - <<'PY'
@@ -91,8 +96,10 @@ jobs:
           if [ -f .github/workflows/patch-capture-lease-recovery.yml ]; then
             git rm .github/workflows/patch-capture-lease-recovery.yml
           fi
-          git commit -m 'fix(android): recover stale local screenshot lease'
-          git push origin HEAD:experiment/ride-accessibility-screenshot-ocr
+          if ! git diff --cached --quiet; then
+            git commit -m 'fix(android): recover stale local screenshot lease'
+            git push origin HEAD:experiment/ride-accessibility-screenshot-ocr
+          fi
 
       - name: Setup Node
         uses: actions/setup-node@v4
