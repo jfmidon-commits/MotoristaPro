@@ -15,6 +15,9 @@ on:
       - ".env.example"
       - ".github/workflows/android-apk.yml"
 
+permissions:
+  contents: write
+
 concurrency:
   group: android-apk-${{ github.ref }}
   cancel-in-progress: true
@@ -27,6 +30,69 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Apply stale local screenshot lease recovery
+        if: github.ref == 'refs/heads/experiment/ride-accessibility-screenshot-ocr'
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('modules/motorista-notification-listener/android/src/main/java/expo/modules/motoristanotificationlistener/RideAccessibilityService.kt')
+          s = p.read_text()
+          old = '''      try {
+        val window = findBestUberWindow()
+        val now = SystemClock.elapsedRealtime()
+        if (
+          isOfferSizedUberWindow(window) &&
+          now >= nextEventCaptureAtElapsed &&
+          retryRunnable == null &&
+          activeLease == null
+        ) {'''
+          new = '''      try {
+        recoverStaleLocalLease()
+        val window = findBestUberWindow()
+        val now = SystemClock.elapsedRealtime()
+        if (
+          isOfferSizedUberWindow(window) &&
+          now >= nextEventCaptureAtElapsed &&
+          retryRunnable == null &&
+          activeLease == null
+        ) {'''
+          if old not in s:
+              raise SystemExit('watchdog block not found')
+          s = s.replace(old, new, 1)
+          marker = '''  private fun isRelevantEventType(eventType: Int): Boolean =
+'''
+          helper = '''  /**
+   * Android can drop a screenshot callback after the process-wide lease has
+   * expired. Clear the service-local token so the foreground watchdog can
+   * acquire a fresh lease instead of remaining permanently stalled.
+   */
+  private fun recoverStaleLocalLease() {
+    val lease = activeLease ?: return
+    if (!ScreenshotCaptureCoordinator.isActive(lease)) {
+      activeLease = null
+    }
+  }
+
+'''
+          if marker not in s:
+              raise SystemExit('helper marker not found')
+          s = s.replace(marker, helper + marker, 1)
+          p.write_text(s)
+          PY
+
+          git diff --check
+          grep -n "recoverStaleLocalLease" modules/motorista-notification-listener/android/src/main/java/expo/modules/motoristanotificationlistener/RideAccessibilityService.kt
+
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add modules/motorista-notification-listener/android/src/main/java/expo/modules/motoristanotificationlistener/RideAccessibilityService.kt
+          if [ -f .github/workflows/patch-capture-lease-recovery.yml ]; then
+            git rm .github/workflows/patch-capture-lease-recovery.yml
+          fi
+          git commit -m 'fix(android): recover stale local screenshot lease'
+          git push origin HEAD:experiment/ride-accessibility-screenshot-ocr
 
       - name: Setup Node
         uses: actions/setup-node@v4
@@ -85,7 +151,7 @@ jobs:
           short_sha="${GITHUB_SHA::7}"
           cp android/app/build/outputs/apk/release/app-release.apk "MotoristaPro-${short_sha}-test.apk"
           sha256sum "MotoristaPro-${short_sha}-test.apk" > "MotoristaPro-${short_sha}-test.apk.sha256"
-          printf 'commit=%s\nworkflow_run=%s\n' "$GITHUB_SHA" "$GITHUB_RUN_ID" > MotoristaPro-build.txt
+          printf 'trigger_sha=%s\nsource_commit=%s\nworkflow_run=%s\n' "$GITHUB_SHA" "$(git rev-parse HEAD)" "$GITHUB_RUN_ID" > MotoristaPro-build.txt
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
