@@ -2,13 +2,14 @@
 name: Apply capture lease recovery
 
 on:
-  push:
+  pull_request:
+    types: [synchronize]
     branches:
-      - experiment/ride-accessibility-screenshot-ocr
+      - main
 
 jobs:
   patch:
-    if: github.actor != 'github-actions[bot]'
+    if: github.event.pull_request.head.ref == 'experiment/ride-accessibility-screenshot-ocr'
     runs-on: ubuntu-latest
     permissions:
       contents: write
