@@ -3,12 +3,9 @@ name: Android APK
 on:
   workflow_dispatch:
   pull_request:
-    branches:
-      - main
+    branches: [main]
   push:
-    branches:
-      - stabilize/offline-sync
-      - experiment/ride-accessibility-screenshot-ocr
+    branches: [experiment/ride-accessibility-screenshot-ocr]
     paths:
       - "src/**"
       - "modules/**"
@@ -19,7 +16,7 @@ on:
       - ".github/workflows/android-apk.yml"
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: android-apk-${{ github.ref }}
@@ -29,74 +26,9 @@ jobs:
   build-apk:
     runs-on: ubuntu-latest
     timeout-minutes: 45
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
-
-      - name: Apply stale local screenshot lease recovery
-        if: github.event.pull_request.head.ref == 'experiment/ride-accessibility-screenshot-ocr' || github.ref == 'refs/heads/experiment/ride-accessibility-screenshot-ocr'
-        shell: bash
-        run: |
-          python3 - <<'PY'
-          from pathlib import Path
-          p = Path('modules/motorista-notification-listener/android/src/main/java/expo/modules/motoristanotificationlistener/RideAccessibilityService.kt')
-          s = p.read_text()
-          old = '''      try {
-        val window = findBestUberWindow()
-        val now = SystemClock.elapsedRealtime()
-        if (
-          isOfferSizedUberWindow(window) &&
-          now >= nextEventCaptureAtElapsed &&
-          retryRunnable == null &&
-          activeLease == null
-        ) {'''
-          new = '''      try {
-        recoverStaleLocalLease()
-        val window = findBestUberWindow()
-        val now = SystemClock.elapsedRealtime()
-        if (
-          isOfferSizedUberWindow(window) &&
-          now >= nextEventCaptureAtElapsed &&
-          retryRunnable == null &&
-          activeLease == null
-        ) {'''
-          if old not in s:
-              raise SystemExit('watchdog block not found')
-          s = s.replace(old, new, 1)
-          marker = '''  private fun isRelevantEventType(eventType: Int): Boolean =
-'''
-          helper = '''  /**
-   * Android can drop a screenshot callback after the process-wide lease has
-   * expired. Clear the service-local token so the foreground watchdog can
-   * acquire a fresh lease instead of remaining permanently stalled.
-   */
-  private fun recoverStaleLocalLease() {
-    val lease = activeLease ?: return
-    if (!ScreenshotCaptureCoordinator.isActive(lease)) {
-      activeLease = null
-    }
-  }
-
-'''
-          if marker not in s:
-              raise SystemExit('helper marker not found')
-          s = s.replace(marker, helper + marker, 1)
-          p.write_text(s)
-          PY
-
-          grep -n "recoverStaleLocalLease" modules/motorista-notification-listener/android/src/main/java/expo/modules/motoristanotificationlistener/RideAccessibilityService.kt
-          git diff --check
-
-          git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add modules/motorista-notification-listener/android/src/main/java/expo/modules/motoristanotificationlistener/RideAccessibilityService.kt
-          if ! git diff --cached --quiet; then
-            git commit -m 'fix(android): recover stale local screenshot lease'
-            git push origin HEAD:experiment/ride-accessibility-screenshot-ocr
-          fi
 
       - name: Setup Node
         uses: actions/setup-node@v4
@@ -140,12 +72,11 @@ jobs:
           NODE_ENV: production
         run: ./gradlew assembleRelease --no-daemon
 
-      - name: Verify APK integrity, signature and package
+      - name: Verify APK
         run: |
           apk="android/app/build/outputs/apk/release/app-release.apk"
           unzip -tq "$apk"
           build_tools_dir="$(find "$ANDROID_HOME/build-tools" -mindepth 1 -maxdepth 1 -type d | sort -V | tail -n 1)"
-          test -n "$build_tools_dir"
           "$build_tools_dir/apksigner" verify --verbose "$apk"
           "$build_tools_dir/aapt" dump badging "$apk" | tee MotoristaPro-apk-badging.txt
           grep -Fq "package: name='com.motoristapro.app'" MotoristaPro-apk-badging.txt
@@ -155,7 +86,7 @@ jobs:
           short_sha="${GITHUB_SHA::7}"
           cp android/app/build/outputs/apk/release/app-release.apk "MotoristaPro-${short_sha}-test.apk"
           sha256sum "MotoristaPro-${short_sha}-test.apk" > "MotoristaPro-${short_sha}-test.apk.sha256"
-          printf 'trigger_sha=%s\nsource_commit=%s\nworkflow_run=%s\n' "$GITHUB_SHA" "$(git rev-parse HEAD)" "$GITHUB_RUN_ID" > MotoristaPro-build.txt
+          printf 'source_commit=%s\nworkflow_run=%s\n' "$(git rev-parse HEAD)" "$GITHUB_RUN_ID" > MotoristaPro-build.txt
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
