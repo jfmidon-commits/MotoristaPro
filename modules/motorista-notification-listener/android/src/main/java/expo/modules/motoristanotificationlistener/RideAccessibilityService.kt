@@ -47,6 +47,7 @@ class RideAccessibilityService : AccessibilityService() {
     private const val NO_OFFER_SEQUENCES_TO_HIDE = 2
     private const val FOREGROUND_POLL_FAST_MS = 1_200L
     private const val FOREGROUND_POLL_IDLE_MS = 5_000L
+    private const val CAPTURE_WATCHDOG_MS = 8_000L
     private val RETRY_DELAYS_MS = longArrayOf(650L, 900L, 1_250L)
     private val IDLE_BACKOFF_MS = longArrayOf(1_500L, 3_000L, 5_000L, 8_000L)
 
@@ -110,6 +111,7 @@ class RideAccessibilityService : AccessibilityService() {
   private var retryGeneration = 0L
   private var nextEventCaptureAtElapsed = 0L
   private var activeLease: CaptureLease? = null
+  private var captureWatchdogRunnable: Runnable? = null
   private var serviceDestroyed = false
   private var overlayView: View? = null
   private var overlayHideRunnable: Runnable? = null
@@ -128,8 +130,7 @@ class RideAccessibilityService : AccessibilityService() {
         if (
           isOfferSizedUberWindow(window) &&
           now >= nextEventCaptureAtElapsed &&
-          retryRunnable == null &&
-          activeLease == null
+          retryRunnable == null
         ) {
           val chainId = beginRetryChain()
           attemptCapture(CaptureTrigger(AccessibilityEvent.TYPE_WINDOWS_CHANGED, window!!.id, 0, chainId))
@@ -175,6 +176,8 @@ class RideAccessibilityService : AccessibilityService() {
     serviceDestroyed = true
     foregroundPollHandler.removeCallbacks(foregroundPollRunnable)
     cancelRetryChain()
+    captureWatchdogRunnable?.let { retryHandler.removeCallbacks(it) }
+    captureWatchdogRunnable = null
     hideDecisionOverlay()
     activeLease?.let(ScreenshotCaptureCoordinator::release)
     activeLease = null
@@ -243,7 +246,24 @@ class RideAccessibilityService : AccessibilityService() {
       return
     }
     activeLease = lease
+    scheduleCaptureWatchdog(trigger, lease)
     takeDisplayScreenshot(trigger, uberWindow, lease)
+  }
+
+  private fun scheduleCaptureWatchdog(trigger: CaptureTrigger, lease: CaptureLease) {
+    captureWatchdogRunnable?.let { retryHandler.removeCallbacks(it) }
+    val watchdog = Runnable {
+      if (serviceDestroyed || activeLease?.token != lease.token) return@Runnable
+      if (!ScreenshotCaptureCoordinator.isActive(lease)) {
+        finishLease(lease)
+        return@Runnable
+      }
+      persistStatus(trigger, findBestUberWindow(), "OCR_PROBE: CAPTURE_TIMEOUT")
+      finishLease(lease)
+      retryOrDefer(trigger)
+    }
+    captureWatchdogRunnable = watchdog
+    retryHandler.postDelayed(watchdog, CAPTURE_WATCHDOG_MS)
   }
 
   private fun findBestUberWindow(): UberWindowSignal? {
@@ -340,40 +360,47 @@ class RideAccessibilityService : AccessibilityService() {
     }
     val width = bitmap.width
     val height = bitmap.height
-    recognizer.process(InputImage.fromBitmap(bitmap, 0))
-      .addOnSuccessListener { result ->
-        try {
-          if (serviceDestroyed || !ScreenshotCaptureCoordinator.isActive(lease)) return@addOnSuccessListener
-          val card = extractCurrentOfferCard(result)
-          if (card == null) handleNoCurrentOffer(trigger, uberWindow)
-          else {
-            consecutiveNoOfferSequences = 0
-            val extraction = extractDecisionOverlayData(card)
-            if (extraction.data != null) {
-              idleBackoff.onOfferDetected()
-              nextEventCaptureAtElapsed = SystemClock.elapsedRealtime() + OVERLAY_STALE_MS
-              cancelRetryChain()
-              showDecisionOverlay(extraction.data)
-            } else {
-              persistStatus(trigger, uberWindow, "OCR_PROBE: DECISION_REJECTED ${extraction.reason}")
-              retryOrDefer(trigger)
+    try {
+      recognizer.process(InputImage.fromBitmap(bitmap, 0))
+        .addOnSuccessListener { result ->
+          try {
+            if (serviceDestroyed || !ScreenshotCaptureCoordinator.isActive(lease)) return@addOnSuccessListener
+            val card = extractCurrentOfferCard(result)
+            if (card == null) handleNoCurrentOffer(trigger, uberWindow)
+            else {
+              consecutiveNoOfferSequences = 0
+              val extraction = extractDecisionOverlayData(card)
+              if (extraction.data != null) {
+                idleBackoff.onOfferDetected()
+                nextEventCaptureAtElapsed = SystemClock.elapsedRealtime() + OVERLAY_STALE_MS
+                cancelRetryChain()
+                showDecisionOverlay(extraction.data)
+              } else {
+                persistStatus(trigger, uberWindow, "OCR_PROBE: DECISION_REJECTED ${extraction.reason}")
+                retryOrDefer(trigger)
+              }
+              persistOcrResult(trigger, uberWindow, card, width, height)
             }
-            persistOcrResult(trigger, uberWindow, card, width, height)
+          } catch (_: Exception) {
+            persistStatus(trigger, uberWindow, "OCR_PROBE: RESULT_PROCESSING_ERROR")
+          } finally {
+            try { bitmap.recycle() } catch (_: Exception) {}
+            finishLease(lease)
           }
-        } catch (_: Exception) {
-          persistStatus(trigger, uberWindow, "OCR_PROBE: RESULT_PROCESSING_ERROR")
-        } finally {
-          try { bitmap.recycle() } catch (_: Exception) {}
-          finishLease(lease)
         }
-      }
-      .addOnFailureListener { error ->
-        try { persistStatus(trigger, uberWindow, "OCR_PROBE: OCR_ERROR ${error.javaClass.simpleName}") }
-        finally {
-          try { bitmap.recycle() } catch (_: Exception) {}
-          finishLease(lease); retryOrDefer(trigger)
+        .addOnFailureListener { error ->
+          try { persistStatus(trigger, uberWindow, "OCR_PROBE: OCR_ERROR ${error.javaClass.simpleName}") }
+          finally {
+            try { bitmap.recycle() } catch (_: Exception) {}
+            finishLease(lease); retryOrDefer(trigger)
+          }
         }
-      }
+    } catch (_: Exception) {
+      try { bitmap.recycle() } catch (_: Exception) {}
+      persistStatus(trigger, uberWindow, "OCR_PROBE: OCR_START_ERROR")
+      finishLease(lease)
+      retryOrDefer(trigger)
+    }
   }
 
   private fun handleNoCurrentOffer(trigger: CaptureTrigger, uberWindow: UberWindowSignal?) {
@@ -417,6 +444,10 @@ class RideAccessibilityService : AccessibilityService() {
   }
 
   private fun finishLease(lease: CaptureLease) {
+    if (captureWatchdogRunnable != null && activeLease?.token == lease.token) {
+      captureWatchdogRunnable?.let { retryHandler.removeCallbacks(it) }
+      captureWatchdogRunnable = null
+    }
     ScreenshotCaptureCoordinator.release(lease)
     if (activeLease?.token == lease.token) activeLease = null
   }
