@@ -135,7 +135,7 @@ class RideAccessibilityService : AccessibilityService() {
           retryRunnable == null
         ) {
           val chainId = beginRetryChain()
-          attemptCapture(CaptureTrigger(AccessibilityEvent.TYPE_WINDOWS_CHANGED, window!!.id, 0, chainId))
+          attemptCapture(CaptureTrigger(AccessibilityEvent.TYPE_WINDOWS_CHANGED, window?.id ?: -1, 0, chainId))
         }
       } catch (_: Exception) {
       } finally {
