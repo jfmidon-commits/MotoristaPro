@@ -125,10 +125,12 @@ class RideAccessibilityService : AccessibilityService() {
     override fun run() {
       if (serviceDestroyed) return
       try {
+        recoverStaleLocalLease()
         val window = findBestUberWindow()
+        val uberForeground = isUberForeground()
         val now = SystemClock.elapsedRealtime()
         if (
-          isOfferSizedUberWindow(window) &&
+          (isOfferSizedUberWindow(window) || uberForeground) &&
           now >= nextEventCaptureAtElapsed &&
           retryRunnable == null
         ) {
@@ -138,7 +140,7 @@ class RideAccessibilityService : AccessibilityService() {
       } catch (_: Exception) {
       } finally {
         if (!serviceDestroyed) {
-          val delay = if (isOfferSizedUberWindow(findBestUberWindow())) FOREGROUND_POLL_FAST_MS else FOREGROUND_POLL_IDLE_MS
+          val delay = if (isOfferSizedUberWindow(findBestUberWindow()) || isUberForeground()) FOREGROUND_POLL_FAST_MS else FOREGROUND_POLL_IDLE_MS
           foregroundPollHandler.postDelayed(this, delay)
         }
       }
@@ -225,8 +227,11 @@ class RideAccessibilityService : AccessibilityService() {
       return
     }
 
+    recoverStaleLocalLease()
     val uberWindow = findBestUberWindow()
-    if (!isOfferSizedUberWindow(uberWindow)) {
+    val uberForeground = isUberForeground()
+    val offerSizedWindow = isOfferSizedUberWindow(uberWindow)
+    if (!offerSizedWindow && !uberForeground) {
       if (trigger.attempt < RETRY_DELAYS_MS.size) scheduleRetry(trigger)
       else {
         confirmNoOfferSequence(trigger, uberWindow, "WINDOW_NOT_READY")
@@ -247,7 +252,9 @@ class RideAccessibilityService : AccessibilityService() {
     }
     activeLease = lease
     scheduleCaptureWatchdog(trigger, lease)
-    takeDisplayScreenshot(trigger, uberWindow, lease)
+    // If Accessibility reports only a tiny SYSTEM window, capture the full display instead.
+    // The OCR parser already requires fare + route legs, so non-offer Uber screens are rejected.
+    takeDisplayScreenshot(trigger, if (offerSizedWindow) uberWindow else null, lease)
   }
 
   private fun scheduleCaptureWatchdog(trigger: CaptureTrigger, lease: CaptureLease) {
@@ -297,6 +304,26 @@ class RideAccessibilityService : AccessibilityService() {
     val widthRatio = window.bounds.width().toDouble() / screenW.toDouble()
     val heightRatio = window.bounds.height().toDouble() / screenH.toDouble()
     return areaRatio >= MIN_UBER_WINDOW_AREA_RATIO && widthRatio >= MIN_UBER_WINDOW_WIDTH_RATIO && heightRatio >= MIN_UBER_WINDOW_HEIGHT_RATIO
+  }
+
+  private fun recoverStaleLocalLease() {
+    val lease = activeLease ?: return
+    if (!ScreenshotCaptureCoordinator.isActive(lease)) {
+      activeLease = null
+      captureWatchdogRunnable?.let { retryHandler.removeCallbacks(it) }
+      captureWatchdogRunnable = null
+    }
+  }
+
+  private fun isUberForeground(): Boolean {
+    var root = try { rootInActiveWindow } catch (_: Exception) { null }
+    return try {
+      root?.packageName?.toString()?.lowercase(Locale.ROOT) == UBER_PACKAGE
+    } catch (_: Exception) {
+      false
+    } finally {
+      try { root?.recycle() } catch (_: Exception) {}
+    }
   }
 
   private fun takeDisplayScreenshot(trigger: CaptureTrigger, uberWindow: UberWindowSignal?, lease: CaptureLease) {
