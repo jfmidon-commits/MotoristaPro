@@ -1,7 +1,7 @@
-import React from "react";
+import React, { useCallback, useEffect } from "react";
 import { NavigationContainer } from "@react-navigation/native";
 import { createNativeStackNavigator } from "@react-navigation/native-stack";
-import { ActivityIndicator, View } from "react-native";
+import { ActivityIndicator, AppState, View } from "react-native";
 import { useAuth } from "@/context/AuthContext";
 import LoginScreen from "@/screens/LoginScreen";
 import DashboardScreen from "@/screens/DashboardScreen";
@@ -14,6 +14,8 @@ import SyncStatusScreen from "@/screens/SyncStatusScreen";
 import WorkSessionScreen from "@/screens/WorkSessionScreen";
 import WorkSessionHistoryScreen from "@/screens/WorkSessionHistoryScreen";
 import WorkSessionDetailScreen from "@/screens/WorkSessionDetailScreen";
+import NotificationCaptureScreen from "@/screens/NotificationCaptureScreen";
+import { processRideLifecycleInbox } from "@/services/RideLifecycleInboxService";
 
 const Stack = createNativeStackNavigator();
 
@@ -24,7 +26,25 @@ const screenOptions = {
 };
 
 export default function AppNavigator() {
-  const { isAuthenticated, isLoading } = useAuth();
+  const { isAuthenticated, isLoading, user } = useAuth();
+
+  const importPendingRideResults = useCallback(() => {
+    if (!isAuthenticated || !user?.id) return;
+    processRideLifecycleInbox(user.id).catch((error) => {
+      console.log("[RIDE_LIFECYCLE] falha ao importar corrida concluída", error);
+    });
+  }, [isAuthenticated, user?.id]);
+
+  useEffect(() => {
+    if (!isAuthenticated || !user?.id) return;
+
+    importPendingRideResults();
+    const subscription = AppState.addEventListener("change", (state) => {
+      if (state === "active") importPendingRideResults();
+    });
+
+    return () => subscription.remove();
+  }, [importPendingRideResults, isAuthenticated, user?.id]);
 
   if (isLoading) {
     return (
@@ -50,6 +70,7 @@ export default function AppNavigator() {
             <Stack.Screen name="Vehicles" component={VehiclesScreen} options={{ title: "Veículos" }} />
             <Stack.Screen name="Maintenance" component={MaintenanceScreen} options={{ title: "Manutenção" }} />
             <Stack.Screen name="PreventiveMaintenance" component={PreventiveMaintenanceScreen} options={{ title: "Manutenção preventiva" }} />
+            <Stack.Screen name="NotificationCapture" component={NotificationCaptureScreen} options={{ title: "Captura automática" }} />
             <Stack.Screen name="SyncStatus" component={SyncStatusScreen} options={{ title: "Status de Sincronização" }} />
           </>
         )}

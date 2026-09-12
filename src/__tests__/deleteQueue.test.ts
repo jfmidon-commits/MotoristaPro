@@ -137,6 +137,24 @@ describe("fila de deleção offline", () => {
     ).toBe(true);
   });
 
+  it("processa tombstones de resultado e oferta de corrida", async () => {
+    const db = createDbMock();
+    db.getAllAsync.mockResolvedValue([
+      { ...pendingDelete, id: "pd-result", table_name: "ride_results", record_id: "result-1" },
+      { ...pendingDelete, id: "pd-offer", table_name: "ride_offers", record_id: "offer-1" }
+    ]);
+    mockedGetDb.mockResolvedValue(db as never);
+    mockRemoteDelete(null);
+
+    await processPendingDeletes("user-1");
+
+    expect(mockedFrom).toHaveBeenCalledWith("ride_results");
+    expect(mockedFrom).toHaveBeenCalledWith("ride_offers");
+    const sqlCalls = db.runAsync.mock.calls.map((call) => String(call[0]));
+    expect(sqlCalls.some((sql) => sql.includes("DELETE FROM ride_results"))).toBe(true);
+    expect(sqlCalls.some((sql) => sql.includes("DELETE FROM ride_offers"))).toBe(true);
+  });
+
   it("modo force consulta também tombstones que atingiram o limite automático", async () => {
     const db = createDbMock();
     db.getAllAsync.mockResolvedValue([]);
