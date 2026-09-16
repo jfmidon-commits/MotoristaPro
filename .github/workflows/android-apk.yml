@@ -56,37 +56,12 @@ jobs:
 
           uber = Path('modules/motorista-notification-listener/android/src/main/java/expo/modules/motoristanotificationlistener/RideAccessibilityService.kt')
           s = uber.read_text()
-
-          s = s.replace(
-              '([0-9]{1,5}(?:[.,][0-9]{1,2})?)',
-              '([1-9][0-9]{0,4}(?:[.,][0-9]{1,2})?)',
-              1
-          )
-          s = s.replace(
-              'private const val CAPTURE_WATCHDOG_MS = 8_000L',
-              'private const val CAPTURE_WATCHDOG_MS = 8_000L\n    private const val RECENT_UBER_EVENT_GRACE_MS = 3_500L',
-              1
-          )
-          s = s.replace(
-              'private var consecutiveNoOfferSequences = 0',
-              'private var consecutiveNoOfferSequences = 0\n  private var lastUberEventAtElapsed = 0L',
-              1
-          )
-          s = s.replace(
-              'if (eventPackage != null && eventPackage != UBER_PACKAGE) return\n\n    val elapsed = SystemClock.elapsedRealtime()',
-              'if (eventPackage != null && eventPackage != UBER_PACKAGE) return\n\n    val elapsed = SystemClock.elapsedRealtime()\n    lastUberEventAtElapsed = elapsed',
-              1
-          )
-          s = s.replace(
-              'if (!offerSizedWindow && !uberForeground) {',
-              'if (!offerSizedWindow && !uberForeground && elapsedSinceLastUberEvent() > RECENT_UBER_EVENT_GRACE_MS) {',
-              1
-          )
-          s = s.replace(
-              'private fun isUberForeground(): Boolean {',
-              'private fun elapsedSinceLastUberEvent(): Long {\n    val last = lastUberEventAtElapsed\n    if (last <= 0L) return Long.MAX_VALUE\n    return (SystemClock.elapsedRealtime() - last).coerceAtLeast(0L)\n  }\n\n  private fun isUberForeground(): Boolean {',
-              1
-          )
+          s = s.replace('([0-9]{1,5}(?:[.,][0-9]{1,2})?)', '([1-9][0-9]{0,4}(?:[.,][0-9]{1,2})?)', 1)
+          s = s.replace('private const val CAPTURE_WATCHDOG_MS = 8_000L', 'private const val CAPTURE_WATCHDOG_MS = 8_000L\n    private const val RECENT_UBER_EVENT_GRACE_MS = 3_500L', 1)
+          s = s.replace('private var consecutiveNoOfferSequences = 0', 'private var consecutiveNoOfferSequences = 0\n  private var lastUberEventAtElapsed = 0L', 1)
+          s = s.replace('if (eventPackage != null && eventPackage != UBER_PACKAGE) return\n\n    val elapsed = SystemClock.elapsedRealtime()', 'if (eventPackage != null && eventPackage != UBER_PACKAGE) return\n\n    val elapsed = SystemClock.elapsedRealtime()\n    lastUberEventAtElapsed = elapsed', 1)
+          s = s.replace('if (!offerSizedWindow && !uberForeground) {', 'if (!offerSizedWindow && !uberForeground && elapsedSinceLastUberEvent() > RECENT_UBER_EVENT_GRACE_MS) {', 1)
+          s = s.replace('private fun isUberForeground(): Boolean {', 'private fun elapsedSinceLastUberEvent(): Long {\n    val last = lastUberEventAtElapsed\n    if (last <= 0L) return Long.MAX_VALUE\n    return (SystemClock.elapsedRealtime() - last).coerceAtLeast(0L)\n  }\n\n  private fun isUberForeground(): Boolean {', 1)
 
           p99 = Path('modules/motorista-notification-listener/android/src/main/java/expo/modules/motoristanotificationlistener/Ride99AccessibilityService.kt')
           s99 = p99.read_text()
@@ -98,7 +73,7 @@ jobs:
         run: |
           grep -Fq 'RECENT_UBER_EVENT_GRACE_MS = 3_500L' modules/motorista-notification-listener/android/src/main/java/expo/modules/motoristanotificationlistener/RideAccessibilityService.kt
           grep -Fq 'elapsedSinceLastUberEvent() > RECENT_UBER_EVENT_GRACE_MS' modules/motorista-notification-listener/android/src/main/java/expo/modules/motoristanotificationlistener/RideAccessibilityService.kt
-          grep -Fq 'bestScore <= dp(140)' modules/motorista-notification-listener/android/src/main/java/expo/modules/motorista-notification-listener/android/src/main/java/expo/modules/motoristanotificationlistener/Ride99AccessibilityService.kt
+          grep -Fq 'bestScore <= dp(140)' modules/motorista-notification-listener/android/src/main/java/expo/modules/motoristanotificationlistener/Ride99AccessibilityService.kt
 
       - name: Generate Android project
         run: npx expo prebuild --platform android --non-interactive --clean
