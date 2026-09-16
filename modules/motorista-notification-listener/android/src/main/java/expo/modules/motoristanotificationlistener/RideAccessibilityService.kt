@@ -61,7 +61,7 @@ class RideAccessibilityService : AccessibilityService() {
     private const val MIN_UBER_WINDOW_HEIGHT_RATIO = 0.12
 
     private val FARE_REGEX = Regex(
-      """(?:R\$|RS|R5)\s*([0-9]{1,5}(?:[.,][0-9]{1,2})?)""",
+      """(?:R\$|RS|R5)\s*([1-9][0-9]{0,4}(?:[.,][0-9]{1,2})?)""",
       RegexOption.IGNORE_CASE
     )
     private val DISTANCE_REGEX = Regex(
@@ -487,7 +487,7 @@ class RideAccessibilityService : AccessibilityService() {
     }
     if (allLines.isEmpty()) return null
     val detectedActionLine = allLines.filter { ACTION_REGEX.containsMatchIn(it.text) }.maxByOrNull { centerY(it.bounds) }
-    val actionLine = detectedActionLine ?: allLines.maxByOrNull { it.bounds.bottom } ?: return null
+    val actionLine = detectedActionLine ?: return null
     val eligibleFares = allLines.filter { line ->
       if (detectedActionLine != null && line.bounds.bottom >= detectedActionLine.bounds.top) return@filter false
       val normalized = normalize(line.text)
