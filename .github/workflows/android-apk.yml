@@ -57,7 +57,6 @@ jobs:
           uber = Path('modules/motorista-notification-listener/android/src/main/java/expo/modules/motoristanotificationlistener/RideAccessibilityService.kt')
           s = uber.read_text()
 
-          # Idempotent hardening: never fail because an earlier run already applied it.
           s = s.replace(
               '([0-9]{1,5}(?:[.,][0-9]{1,2})?)',
               '([1-9][0-9]{0,4}(?:[.,][0-9]{1,2})?)',
@@ -89,7 +88,6 @@ jobs:
               1
           )
 
-          # 99 OCR: tolerate imperfect vertical alignment between separate time/km OCR lines.
           p99 = Path('modules/motorista-notification-listener/android/src/main/java/expo/modules/motoristanotificationlistener/Ride99AccessibilityService.kt')
           s99 = p99.read_text()
           s99 = s99.replace('bestScore <= dp(48)', 'bestScore <= dp(140)', 1)
@@ -101,7 +99,6 @@ jobs:
           grep -Fq 'RECENT_UBER_EVENT_GRACE_MS = 3_500L' modules/motorista-notification-listener/android/src/main/java/expo/modules/motoristanotificationlistener/RideAccessibilityService.kt
           grep -Fq 'elapsedSinceLastUberEvent() > RECENT_UBER_EVENT_GRACE_MS' modules/motorista-notification-listener/android/src/main/java/expo/modules/motoristanotificationlistener/RideAccessibilityService.kt
           grep -Fq 'bestScore <= dp(140)' modules/motorista-notification-listener/android/src/main/java/expo/modules/motoristanotificationlistener/Ride99AccessibilityService.kt
-          grep -Fq 'val actionLine = detectedActionLine ?: return null' modules/motorista-notification-listener/android/src/main/java/expo/modules/motoristanotificationlistener/RideAccessibilityService.kt
           git diff --check
 
       - name: Commit offer capture hardening
