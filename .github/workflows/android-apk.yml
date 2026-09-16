@@ -62,16 +62,12 @@ jobs:
           old='val actionLine = detectedActionLine ?: allLines.maxByOrNull { it.bounds.bottom } ?: return null'
           assert old in s, 'action fallback target missing'
           s=s.replace(old,'val actionLine = detectedActionLine ?: return null',1)
-          old='if (routeLegs.isEmpty())'
-          assert s.count(old) == 1, 'route guard target mismatch'
-          s=s.replace(old,'if (routeLegs.size < 2)',1)
           p.write_text(s)
 
       - name: Verify Uber parser hardening
         run: |
           grep -Fq '([1-9][0-9]{0,4}' modules/motorista-notification-listener/android/src/main/java/expo/modules/motoristanotificationlistener/RideAccessibilityService.kt
           grep -Fq 'val actionLine = detectedActionLine ?: return null' modules/motorista-notification-listener/android/src/main/java/expo/modules/motoristanotificationlistener/RideAccessibilityService.kt
-          grep -Fq 'if (routeLegs.size < 2)' modules/motorista-notification-listener/android/src/main/java/expo/modules/motoristanotificationlistener/RideAccessibilityService.kt
           git diff --check
 
       - name: Commit Uber parser hardening
