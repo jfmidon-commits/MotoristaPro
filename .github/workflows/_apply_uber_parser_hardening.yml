@@ -22,7 +22,6 @@ jobs:
         run: |
           python3 - <<'PY'
           from pathlib import Path
-          import re
           p=Path('modules/motorista-notification-listener/android/src/main/java/expo/modules/motoristanotificationlistener/RideAccessibilityService.kt')
           s=p.read_text()
           old='''"""(?:R\\$|RS|R5)\\s*([0-9]{1,5}(?:[.,][0-9]{1,2})?)"""'''
@@ -54,3 +53,5 @@ jobs:
           git diff --cached --check
           git commit -m "fix(android): harden Uber offer admission"
           git push origin HEAD:experiment/ride-accessibility-screenshot-ocr
+
+# trigger hardening workflow
