@@ -29,6 +29,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: experiment/ride-accessibility-screenshot-ocr
 
       - name: Setup Node
         uses: actions/setup-node@v4
@@ -53,17 +55,16 @@ jobs:
           from pathlib import Path
           p=Path('modules/motorista-notification-listener/android/src/main/java/expo/modules/motoristanotificationlistener/RideAccessibilityService.kt')
           s=p.read_text()
-          old='''"""(?:R\\$|RS|R5)\\s*([0-9]{1,5}(?:[.,][0-9]{1,2})?)"""'''
-          new='''"""(?:R\\$|RS|R5)\\s*([1-9][0-9]{0,4}(?:[.,][0-9]{1,2})?)"""'''
-          if old in s:
-              s=s.replace(old,new,1)
+          old='([0-9]{1,5}(?:[.,][0-9]{1,2})?)'
+          new='([1-9][0-9]{0,4}(?:[.,][0-9]{1,2})?)'
+          assert old in s, 'fare capture target missing'
+          s=s.replace(old,new,1)
           old='val actionLine = detectedActionLine ?: allLines.maxByOrNull { it.bounds.bottom } ?: return null'
-          new='val actionLine = detectedActionLine ?: return null'
-          if old in s:
-              s=s.replace(old,new,1)
-          if 'if (routeLegs.isEmpty())' in s:
-              assert s.count('if (routeLegs.isEmpty())') == 1
-              s=s.replace('if (routeLegs.isEmpty())','if (routeLegs.size < 2)',1)
+          assert old in s, 'action fallback target missing'
+          s=s.replace(old,'val actionLine = detectedActionLine ?: return null',1)
+          old='if (routeLegs.isEmpty())'
+          assert s.count(old) == 1, 'route guard target mismatch'
+          s=s.replace(old,'if (routeLegs.size < 2)',1)
           p.write_text(s)
 
       - name: Verify Uber parser hardening
@@ -72,6 +73,16 @@ jobs:
           grep -Fq 'val actionLine = detectedActionLine ?: return null' modules/motorista-notification-listener/android/src/main/java/expo/modules/motoristanotificationlistener/RideAccessibilityService.kt
           grep -Fq 'if (routeLegs.size < 2)' modules/motorista-notification-listener/android/src/main/java/expo/modules/motoristanotificationlistener/RideAccessibilityService.kt
           git diff --check
+
+      - name: Commit Uber parser hardening
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add modules/motorista-notification-listener/android/src/main/java/expo/modules/motoristanotificationlistener/RideAccessibilityService.kt
+          if git diff --cached --quiet; then exit 0; fi
+          git diff --cached --check
+          git commit -m "fix(android): harden Uber offer admission"
+          git push origin HEAD:experiment/ride-accessibility-screenshot-ocr
 
       - name: Generate Android project
         run: npx expo prebuild --platform android --non-interactive --clean
@@ -125,13 +136,3 @@ jobs:
             MotoristaPro-build.txt
           if-no-files-found: error
           retention-days: 14
-
-      - name: Commit Uber parser hardening
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add modules/motorista-notification-listener/android/src/main/java/expo/modules/motoristanotificationlistener/RideAccessibilityService.kt
-          if git diff --cached --quiet; then exit 0; fi
-          git diff --cached --check
-          git commit -m "fix(android): harden Uber offer admission"
-          git push origin HEAD:experiment/ride-accessibility-screenshot-ocr
