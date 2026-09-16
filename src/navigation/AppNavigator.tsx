@@ -1,7 +1,7 @@
-import React, { useCallback, useEffect } from "react";
+import React from "react";
 import { NavigationContainer } from "@react-navigation/native";
 import { createNativeStackNavigator } from "@react-navigation/native-stack";
-import { ActivityIndicator, AppState, View } from "react-native";
+import { ActivityIndicator, View } from "react-native";
 import { useAuth } from "@/context/AuthContext";
 import LoginScreen from "@/screens/LoginScreen";
 import DashboardScreen from "@/screens/DashboardScreen";
@@ -15,7 +15,6 @@ import WorkSessionScreen from "@/screens/WorkSessionScreen";
 import WorkSessionHistoryScreen from "@/screens/WorkSessionHistoryScreen";
 import WorkSessionDetailScreen from "@/screens/WorkSessionDetailScreen";
 import NotificationCaptureScreen from "@/screens/NotificationCaptureScreen";
-import { processRideLifecycleInbox } from "@/services/RideLifecycleInboxService";
 
 const Stack = createNativeStackNavigator();
 
@@ -26,25 +25,7 @@ const screenOptions = {
 };
 
 export default function AppNavigator() {
-  const { isAuthenticated, isLoading, user } = useAuth();
-
-  const importPendingRideResults = useCallback(() => {
-    if (!isAuthenticated || !user?.id) return;
-    processRideLifecycleInbox(user.id).catch((error) => {
-      console.log("[RIDE_LIFECYCLE] falha ao importar corrida concluída", error);
-    });
-  }, [isAuthenticated, user?.id]);
-
-  useEffect(() => {
-    if (!isAuthenticated || !user?.id) return;
-
-    importPendingRideResults();
-    const subscription = AppState.addEventListener("change", (state) => {
-      if (state === "active") importPendingRideResults();
-    });
-
-    return () => subscription.remove();
-  }, [importPendingRideResults, isAuthenticated, user?.id]);
+  const { isAuthenticated, isLoading } = useAuth();
 
   if (isLoading) {
     return (
