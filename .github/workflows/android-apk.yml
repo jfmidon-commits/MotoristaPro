@@ -65,7 +65,7 @@ jobs:
 
           p99 = Path('modules/motorista-notification-listener/android/src/main/java/expo/modules/motoristanotificationlistener/Ride99AccessibilityService.kt')
           s99 = p99.read_text()
-          s99 = s99.replace('bestScore <= dp(48)', 'bestScore <= dp(140)', 1)
+          s99 = s99.replace('bs <= dp(52)', 'bs <= dp(140)', 1)
           p99.write_text(s99)
           uber.write_text(s)
 
@@ -73,7 +73,7 @@ jobs:
         run: |
           grep -Fq 'RECENT_UBER_EVENT_GRACE_MS = 3_500L' modules/motorista-notification-listener/android/src/main/java/expo/modules/motoristanotificationlistener/RideAccessibilityService.kt
           grep -Fq 'elapsedSinceLastUberEvent() > RECENT_UBER_EVENT_GRACE_MS' modules/motorista-notification-listener/android/src/main/java/expo/modules/motoristanotificationlistener/RideAccessibilityService.kt
-          grep -Fq 'bestScore <= dp(140)' modules/motorista-notification-listener/android/src/main/java/expo/modules/motoristanotificationlistener/Ride99AccessibilityService.kt
+          grep -Fq 'bs <= dp(140)' modules/motorista-notification-listener/android/src/main/java/expo/modules/motoristanotificationlistener/Ride99AccessibilityService.kt
 
       - name: Generate Android project
         run: npx expo prebuild --platform android --non-interactive --clean
