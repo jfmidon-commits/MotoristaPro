@@ -49,35 +49,69 @@ jobs:
       - name: Configure MotoristaPro Supabase
         run: cp .env.example .env.local
 
-      - name: Harden Uber offer admission
+      - name: Harden offer capture admission and retries
         shell: python
         run: |
           from pathlib import Path
-          p=Path('modules/motorista-notification-listener/android/src/main/java/expo/modules/motoristanotificationlistener/RideAccessibilityService.kt')
-          s=p.read_text()
-          old='([0-9]{1,5}(?:[.,][0-9]{1,2})?)'
-          new='([1-9][0-9]{0,4}(?:[.,][0-9]{1,2})?)'
-          assert old in s, 'fare capture target missing'
-          s=s.replace(old,new,1)
-          old='val actionLine = detectedActionLine ?: allLines.maxByOrNull { it.bounds.bottom } ?: return null'
-          assert old in s, 'action fallback target missing'
-          s=s.replace(old,'val actionLine = detectedActionLine ?: return null',1)
-          p.write_text(s)
 
-      - name: Verify Uber parser hardening
+          uber = Path('modules/motorista-notification-listener/android/src/main/java/expo/modules/motoristanotificationlistener/RideAccessibilityService.kt')
+          s = uber.read_text()
+
+          # Idempotent hardening: never fail because an earlier run already applied it.
+          s = s.replace(
+              '([0-9]{1,5}(?:[.,][0-9]{1,2})?)',
+              '([1-9][0-9]{0,4}(?:[.,][0-9]{1,2})?)',
+              1
+          )
+          s = s.replace(
+              'private const val CAPTURE_WATCHDOG_MS = 8_000L',
+              'private const val CAPTURE_WATCHDOG_MS = 8_000L\n    private const val RECENT_UBER_EVENT_GRACE_MS = 3_500L',
+              1
+          )
+          s = s.replace(
+              'private var consecutiveNoOfferSequences = 0',
+              'private var consecutiveNoOfferSequences = 0\n  private var lastUberEventAtElapsed = 0L',
+              1
+          )
+          s = s.replace(
+              'if (eventPackage != null && eventPackage != UBER_PACKAGE) return\n\n    val elapsed = SystemClock.elapsedRealtime()',
+              'if (eventPackage != null && eventPackage != UBER_PACKAGE) return\n\n    val elapsed = SystemClock.elapsedRealtime()\n    lastUberEventAtElapsed = elapsed',
+              1
+          )
+          s = s.replace(
+              'if (!offerSizedWindow && !uberForeground) {',
+              'if (!offerSizedWindow && !uberForeground && elapsedSinceLastUberEvent() > RECENT_UBER_EVENT_GRACE_MS) {',
+              1
+          )
+          s = s.replace(
+              'private fun isUberForeground(): Boolean {',
+              'private fun elapsedSinceLastUberEvent(): Long {\n    val last = lastUberEventAtElapsed\n    if (last <= 0L) return Long.MAX_VALUE\n    return (SystemClock.elapsedRealtime() - last).coerceAtLeast(0L)\n  }\n\n  private fun isUberForeground(): Boolean {',
+              1
+          )
+
+          # 99 OCR: tolerate imperfect vertical alignment between separate time/km OCR lines.
+          p99 = Path('modules/motorista-notification-listener/android/src/main/java/expo/modules/motoristanotificationlistener/Ride99AccessibilityService.kt')
+          s99 = p99.read_text()
+          s99 = s99.replace('bestScore <= dp(48)', 'bestScore <= dp(140)', 1)
+          p99.write_text(s99)
+          uber.write_text(s)
+
+      - name: Verify offer capture hardening
         run: |
-          grep -Fq '([1-9][0-9]{0,4}' modules/motorista-notification-listener/android/src/main/java/expo/modules/motoristanotificationlistener/RideAccessibilityService.kt
+          grep -Fq 'RECENT_UBER_EVENT_GRACE_MS = 3_500L' modules/motorista-notification-listener/android/src/main/java/expo/modules/motoristanotificationlistener/RideAccessibilityService.kt
+          grep -Fq 'elapsedSinceLastUberEvent() > RECENT_UBER_EVENT_GRACE_MS' modules/motorista-notification-listener/android/src/main/java/expo/modules/motoristanotificationlistener/RideAccessibilityService.kt
+          grep -Fq 'bestScore <= dp(140)' modules/motorista-notification-listener/android/src/main/java/expo/modules/motoristanotificationlistener/Ride99AccessibilityService.kt
           grep -Fq 'val actionLine = detectedActionLine ?: return null' modules/motorista-notification-listener/android/src/main/java/expo/modules/motoristanotificationlistener/RideAccessibilityService.kt
           git diff --check
 
-      - name: Commit Uber parser hardening
+      - name: Commit offer capture hardening
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add modules/motorista-notification-listener/android/src/main/java/expo/modules/motoristanotificationlistener/RideAccessibilityService.kt
+          git add modules/motorista-notification-listener/android/src/main/java/expo/modules/motoristanotificationlistener/RideAccessibilityService.kt modules/motorista-notification-listener/android/src/main/java/expo/modules/motoristanotificationlistener/Ride99AccessibilityService.kt
           if git diff --cached --quiet; then exit 0; fi
           git diff --cached --check
-          git commit -m "fix(android): harden Uber offer admission"
+          git commit -m "fix(android): harden offer capture retries"
           git push origin HEAD:experiment/ride-accessibility-screenshot-ocr
 
       - name: Generate Android project
