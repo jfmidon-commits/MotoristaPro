@@ -1,0 +1,56 @@
+name: Apply Uber parser hardening
+
+on:
+  push:
+    branches: [experiment/ride-accessibility-screenshot-ocr]
+    paths:
+      - ".github/workflows/_apply_uber_parser_hardening.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  harden:
+    if: github.actor == 'jfmidon-commits'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: experiment/ride-accessibility-screenshot-ocr
+
+      - name: Apply hardening
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+          p=Path('modules/motorista-notification-listener/android/src/main/java/expo/modules/motoristanotificationlistener/RideAccessibilityService.kt')
+          s=p.read_text()
+          old='''"""(?:R\\$|RS|R5)\\s*([0-9]{1,5}(?:[.,][0-9]{1,2})?)"""'''
+          new='''"""(?:R\\$|RS|R5)\\s*([1-9][0-9]{0,4}(?:[.,][0-9]{1,2})?)"""'''
+          assert old in s, 'fare regex target not found'
+          s=s.replace(old,new,1)
+          old='val actionLine = detectedActionLine ?: allLines.maxByOrNull { it.bounds.bottom } ?: return null'
+          new='val actionLine = detectedActionLine ?: return null'
+          assert old in s, 'action fallback target not found'
+          s=s.replace(old,new,1)
+          assert s.count('if (routeLegs.isEmpty())') == 1, 'route guard target count mismatch'
+          s=s.replace('if (routeLegs.isEmpty())','if (routeLegs.size < 2)',1)
+          p.write_text(s)
+          PY
+
+      - name: Verify hardening
+        run: |
+          grep -Fq '([1-9][0-9]{0,4}' modules/motorista-notification-listener/android/src/main/java/expo/modules/motoristanotificationlistener/RideAccessibilityService.kt
+          grep -Fq 'val actionLine = detectedActionLine ?: return null' modules/motorista-notification-listener/android/src/main/java/expo/modules/motoristanotificationlistener/RideAccessibilityService.kt
+          grep -Fq 'if (routeLegs.size < 2)' modules/motorista-notification-listener/android/src/main/java/expo/modules/motoristanotificationlistener/RideAccessibilityService.kt
+          git diff --check
+
+      - name: Commit and remove workflow
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add modules/motorista-notification-listener/android/src/main/java/expo/modules/motoristanotificationlistener/RideAccessibilityService.kt
+          git rm .github/workflows/_apply_uber_parser_hardening.yml
+          git diff --cached --check
+          git commit -m "fix(android): harden Uber offer admission"
+          git push origin HEAD:experiment/ride-accessibility-screenshot-ocr
