@@ -16,7 +16,6 @@ import {
 } from "@/services/PreventiveMaintenanceService";
 import { getPendingRideOffers, syncRideOffer } from "@/services/RideOfferService";
 import { getPendingRideResults, syncRideResult } from "@/services/RideResultService";
-import { processRideLifecycleInbox } from "@/services/RideLifecycleInboxService";
 import { pullRemoteState } from "@/services/PullSyncService";
 import { useAuth } from "@/context/AuthContext";
 import type { SyncStatusSnapshot } from "@/types";
@@ -87,17 +86,6 @@ export function useTransactionSync() {
 
   const syncNow = useCallback(async (opts?: { force?: boolean }) => {
     if (!isAuthenticated || !user?.id || isSyncing.current) return;
-
-    // Importa primeiro os recebimentos confirmados no overlay nativo. Isso é local-first:
-    // a corrida entra no livro-caixa mesmo sem internet; o sync remoto acontece depois.
-    try {
-      const lifecycle = await processRideLifecycleInbox(user.id);
-      if (lifecycle.errors.length > 0) {
-        setStatus((s) => ({ ...s, lastError: lifecycle.errors[0] }));
-      }
-    } catch (err: any) {
-      setStatus((s) => ({ ...s, lastError: err?.message ?? "Falha ao importar corrida concluída." }));
-    }
 
     const net = await NetInfo.fetch();
     if (!net.isConnected || net.isInternetReachable === false) {
