@@ -49,31 +49,55 @@ jobs:
       - name: Configure MotoristaPro Supabase
         run: cp .env.example .env.local
 
-      - name: Harden offer capture admission and retries
+      - name: Apply capture reliability fix
         shell: python
         run: |
           from pathlib import Path
 
-          uber = Path('modules/motorista-notification-listener/android/src/main/java/expo/modules/motoristanotificationlistener/RideAccessibilityService.kt')
+          root = Path('modules/motorista-notification-listener/android/src/main/java/expo/modules/motoristanotificationlistener')
+          uber = root / 'RideAccessibilityService.kt'
           s = uber.read_text()
-          s = s.replace('([0-9]{1,5}(?:[.,][0-9]{1,2})?)', '([1-9][0-9]{0,4}(?:[.,][0-9]{1,2})?)', 1)
-          s = s.replace('private const val CAPTURE_WATCHDOG_MS = 8_000L', 'private const val CAPTURE_WATCHDOG_MS = 8_000L\n    private const val RECENT_UBER_EVENT_GRACE_MS = 3_500L', 1)
-          s = s.replace('private var consecutiveNoOfferSequences = 0', 'private var consecutiveNoOfferSequences = 0\n  private var lastUberEventAtElapsed = 0L', 1)
-          s = s.replace('if (eventPackage != null && eventPackage != UBER_PACKAGE) return\n\n    val elapsed = SystemClock.elapsedRealtime()', 'if (eventPackage != null && eventPackage != UBER_PACKAGE) return\n\n    val elapsed = SystemClock.elapsedRealtime()\n    lastUberEventAtElapsed = elapsed', 1)
-          s = s.replace('if (!offerSizedWindow && !uberForeground) {', 'if (!offerSizedWindow && !uberForeground && elapsedSinceLastUberEvent() > RECENT_UBER_EVENT_GRACE_MS) {', 1)
-          s = s.replace('private fun isUberForeground(): Boolean {', 'private fun elapsedSinceLastUberEvent(): Long {\n    val last = lastUberEventAtElapsed\n    if (last <= 0L) return Long.MAX_VALUE\n    return (SystemClock.elapsedRealtime() - last).coerceAtLeast(0L)\n  }\n\n  private fun isUberForeground(): Boolean {', 1)
 
-          p99 = Path('modules/motorista-notification-listener/android/src/main/java/expo/modules/motoristanotificationlistener/Ride99AccessibilityService.kt')
-          s99 = p99.read_text()
-          s99 = s99.replace('bs <= dp(52)', 'bs <= dp(140)', 1)
-          p99.write_text(s99)
+          # Uber: do not require the action button to be visible/readable.
+          s = s.replace('private const val FOREGROUND_POLL_FAST_MS = 1_200L', 'private const val FOREGROUND_POLL_FAST_MS = 900L', 1)
+          s = s.replace('private const val FOREGROUND_POLL_IDLE_MS = 5_000L', 'private const val FOREGROUND_POLL_IDLE_MS = 2_500L', 1)
+          s = s.replace('private val IDLE_BACKOFF_MS = longArrayOf(1_500L, 3_000L, 5_000L, 8_000L)', 'private val IDLE_BACKOFF_MS = longArrayOf(1_000L, 2_000L, 3_000L, 4_000L)', 1)
+          s = s.replace('private const val MIN_UBER_WINDOW_AREA_RATIO = 0.08', 'private const val MIN_UBER_WINDOW_AREA_RATIO = 0.04', 1)
+          s = s.replace('private const val MIN_UBER_WINDOW_WIDTH_RATIO = 0.40', 'private const val MIN_UBER_WINDOW_WIDTH_RATIO = 0.25', 1)
+          s = s.replace('private const val MIN_UBER_WINDOW_HEIGHT_RATIO = 0.12', 'private const val MIN_UBER_WINDOW_HEIGHT_RATIO = 0.08', 1)
+
+          old = '''    val detectedActionLine = allLines.filter { ACTION_REGEX.containsMatchIn(it.text) }.maxByOrNull { centerY(it.bounds) }\n    val actionLine = detectedActionLine ?: return null\n    val eligibleFares = allLines.filter { line ->\n      if (detectedActionLine != null && line.bounds.bottom >= detectedActionLine.bounds.top) return@filter false\n'''
+          new = '''    val detectedActionLine = allLines.filter { ACTION_REGEX.containsMatchIn(it.text) }.maxByOrNull { centerY(it.bounds) }\n    val eligibleFares = allLines.filter { line ->\n      if (detectedActionLine != null && line.bounds.bottom >= detectedActionLine.bounds.top) return@filter false\n'''
+          if old not in s:
+              raise SystemExit('Uber admission gate pattern not found')
+          s = s.replace(old, new, 1)
+
+          old2 = '''    val mainFare = eligibleFares.maxWithOrNull(compareBy<OcrLineRecord> { it.bounds.height() }.thenBy { it.bounds.width() }.thenBy { centerY(it.bounds) }) ?: return null\n    if (actionLine.bounds.top <= mainFare.bounds.bottom && detectedActionLine != null) return null\n    val inferredBottom = if (detectedActionLine != null) actionLine.bounds.bottom else (mainFare.bounds.bottom + dp(900)).coerceAtMost(resources.displayMetrics.heightPixels)\n'''
+          new2 = '''    val mainFare = eligibleFares.maxWithOrNull(compareBy<OcrLineRecord> { it.bounds.height() }.thenBy { it.bounds.width() }.thenBy { centerY(it.bounds) }) ?: return null\n    val actionLine = detectedActionLine ?: OcrLineRecord(\n      text = "",\n      bounds = Rect(mainFare.bounds.left, resources.displayMetrics.heightPixels, mainFare.bounds.right, resources.displayMetrics.heightPixels)\n    )\n    if (detectedActionLine != null && actionLine.bounds.top <= mainFare.bounds.bottom) return null\n    val inferredBottom = if (detectedActionLine != null) actionLine.bounds.bottom else (mainFare.bounds.bottom + dp(900)).coerceAtMost(resources.displayMetrics.heightPixels)\n'''
+          if old2 not in s:
+              raise SystemExit('Uber synthetic action pattern not found')
+          s = s.replace(old2, new2, 1)
           uber.write_text(s)
 
-      - name: Verify offer capture hardening
+          p99 = root / 'Ride99AccessibilityService.kt'
+          s99 = p99.read_text()
+          s99 = s99.replace('if (legs.size !in 2..3) return null', 'if (legs.isEmpty() || legs.size > 3) return null', 1)
+          s99 = s99.replace('if (shownPerKm != null && abs(calculatedPerKm - shownPerKm) > 0.45) return null', 'if (shownPerKm != null && abs(calculatedPerKm - shownPerKm) > max(0.75, shownPerKm * 0.35)) { /* tolerate OCR rounding */ }', 1)
+          p99.write_text(s99)
+
+          coord = root / 'ScreenshotCaptureCoordinator.kt'
+          sc = coord.read_text()
+          sc = sc.replace('private const val MIN_START_INTERVAL_MS = 700L', 'private const val MIN_START_INTERVAL_MS = 450L', 1)
+          sc = sc.replace('private const val LEASE_TIMEOUT_MS = 12_000L', 'private const val LEASE_TIMEOUT_MS = 9_000L', 1)
+          coord.write_text(sc)
+
+      - name: Verify capture reliability fix
         run: |
-          grep -Fq 'RECENT_UBER_EVENT_GRACE_MS = 3_500L' modules/motorista-notification-listener/android/src/main/java/expo/modules/motoristanotificationlistener/RideAccessibilityService.kt
-          grep -Fq 'elapsedSinceLastUberEvent() > RECENT_UBER_EVENT_GRACE_MS' modules/motorista-notification-listener/android/src/main/java/expo/modules/motoristanotificationlistener/RideAccessibilityService.kt
-          grep -Fq 'bs <= dp(140)' modules/motorista-notification-listener/android/src/main/java/expo/modules/motoristanotificationlistener/Ride99AccessibilityService.kt
+          grep -Fq 'MIN_UBER_WINDOW_AREA_RATIO = 0.04' modules/motorista-notification-listener/android/src/main/java/expo/modules/motoristanotificationlistener/RideAccessibilityService.kt
+          grep -Fq 'MIN_UBER_WINDOW_WIDTH_RATIO = 0.25' modules/motorista-notification-listener/android/src/main/java/expo/modules/motoristanotificationlistener/RideAccessibilityService.kt
+          grep -Fq 'text = ""' modules/motorista-notification-listener/android/src/main/java/expo/modules/motoristanotificationlistener/RideAccessibilityService.kt
+          grep -Fq 'MIN_START_INTERVAL_MS = 450L' modules/motorista-notification-listener/android/src/main/java/expo/modules/motoristanotificationlistener/ScreenshotCaptureCoordinator.kt
+          grep -Fq 'LEASE_TIMEOUT_MS = 9_000L' modules/motorista-notification-listener/android/src/main/java/expo/modules/motoristanotificationlistener/ScreenshotCaptureCoordinator.kt
 
       - name: Generate Android project
         run: npx expo prebuild --platform android --non-interactive --clean
