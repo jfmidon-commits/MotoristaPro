@@ -58,6 +58,13 @@ jobs:
           uber = root / 'RideAccessibilityService.kt'
           s = uber.read_text()
 
+          # Keep Uber event context briefly while Accessibility windows settle.
+          s = s.replace('private const val CAPTURE_WATCHDOG_MS = 8_000L', 'private const val CAPTURE_WATCHDOG_MS = 8_000L\n    private const val RECENT_UBER_EVENT_GRACE_MS = 8_000L', 1)
+          s = s.replace('private var consecutiveNoOfferSequences = 0', 'private var consecutiveNoOfferSequences = 0\n  private var lastUberEventAtElapsed = 0L', 1)
+          s = s.replace('val elapsed = SystemClock.elapsedRealtime()\n    val strongSignal', 'val elapsed = SystemClock.elapsedRealtime()\n    lastUberEventAtElapsed = elapsed\n    val strongSignal', 1)
+          s = s.replace('if (!offerSizedWindow && !uberForeground) {', 'if (!offerSizedWindow && !uberForeground && elapsedSinceLastUberEvent() > RECENT_UBER_EVENT_GRACE_MS) {', 1)
+          s = s.replace('private fun isUberForeground(): Boolean {', 'private fun elapsedSinceLastUberEvent(): Long {\n    val last = lastUberEventAtElapsed\n    if (last <= 0L) return Long.MAX_VALUE\n    return (SystemClock.elapsedRealtime() - last).coerceAtLeast(0L)\n  }\n\n  private fun isUberForeground(): Boolean {', 1)
+
           # Uber: do not require the action button to be visible/readable.
           s = s.replace('private const val FOREGROUND_POLL_FAST_MS = 1_200L', 'private const val FOREGROUND_POLL_FAST_MS = 900L', 1)
           s = s.replace('private const val FOREGROUND_POLL_IDLE_MS = 5_000L', 'private const val FOREGROUND_POLL_IDLE_MS = 2_500L', 1)
@@ -93,6 +100,8 @@ jobs:
 
       - name: Verify capture reliability fix
         run: |
+          grep -Fq 'RECENT_UBER_EVENT_GRACE_MS = 8_000L' modules/motorista-notification-listener/android/src/main/java/expo/modules/motoristanotificationlistener/RideAccessibilityService.kt
+          grep -Fq 'elapsedSinceLastUberEvent() > RECENT_UBER_EVENT_GRACE_MS' modules/motorista-notification-listener/android/src/main/java/expo/modules/motoristanotificationlistener/RideAccessibilityService.kt
           grep -Fq 'MIN_UBER_WINDOW_AREA_RATIO = 0.04' modules/motorista-notification-listener/android/src/main/java/expo/modules/motoristanotificationlistener/RideAccessibilityService.kt
           grep -Fq 'MIN_UBER_WINDOW_WIDTH_RATIO = 0.25' modules/motorista-notification-listener/android/src/main/java/expo/modules/motoristanotificationlistener/RideAccessibilityService.kt
           grep -Fq 'text = ""' modules/motorista-notification-listener/android/src/main/java/expo/modules/motoristanotificationlistener/RideAccessibilityService.kt
