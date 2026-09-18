@@ -2,9 +2,11 @@ import "react-native-get-random-values";
 import { v4 as uuidv4 } from "uuid";
 import { getDb } from "@/lib/database";
 import { supabase } from "@/lib/supabase";
-import type { Transaction, TransactionType, SupabaseErrorShape, PendingDelete } from "@/types";
+import type { Transaction, TransactionType, SupabaseErrorShape, PendingDelete, RideOffer } from "@/types";
 
 const MAX_DELETE_ATTEMPTS = 5;
+const RIDE_DEDUPE_WINDOW_MS = 90_000;
+const RIDE_OFFER_ID_PATTERN = /oferta\s+([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i;
 
 export async function addTransaction(params: {
   userId: string;
@@ -190,6 +192,12 @@ export async function processPendingDeletes(
         case "preventive_maintenance_plans":
           result = await supabase.from("preventive_maintenance_plans").delete().eq("id", item.record_id);
           break;
+        case "ride_results":
+          result = await supabase.from("ride_results").delete().eq("id", item.record_id);
+          break;
+        case "ride_offers":
+          result = await supabase.from("ride_offers").delete().eq("id", item.record_id);
+          break;
         default:
           remoteError = "table_name desconhecido";
       }
@@ -227,6 +235,12 @@ export async function processPendingDeletes(
       case "preventive_maintenance_plans":
         await db.runAsync(`DELETE FROM preventive_maintenance_plans WHERE id = ?`, [item.record_id]);
         break;
+      case "ride_results":
+        await db.runAsync(`DELETE FROM ride_results WHERE id = ?`, [item.record_id]);
+        break;
+      case "ride_offers":
+        await db.runAsync(`DELETE FROM ride_offers WHERE id = ?`, [item.record_id]);
+        break;
     }
 
     await db.runAsync(`DELETE FROM pending_deletes WHERE id = ?`, [item.id]);
@@ -261,6 +275,64 @@ export async function deleteTransaction(userId: string, id: string): Promise<voi
      WHERE user_id = ? AND table_name = 'transactions' AND record_id = ?`,
     [userId, id]
   );
+}
+
+function rideOfferSignature(offer: RideOffer): string {
+  const distance = offer.total_expected_distance_km == null ? "null" : offer.total_expected_distance_km.toFixed(2);
+  const duration = offer.total_expected_duration_minutes == null ? "null" : offer.total_expected_duration_minutes.toFixed(1);
+  return [
+    offer.platform,
+    offer.offered_amount + offer.additional_pay,
+    offer.category ?? "",
+    distance,
+    duration
+  ].join("|");
+}
+
+/**
+ * Removes only historical income transactions that are strongly identifiable as
+ * duplicated automatic ride captures. The oldest transaction in each matching
+ * 90-second offer window is kept; manual transactions are never touched.
+ */
+export async function cleanupDuplicateRideTransactions(userId: string): Promise<number> {
+  const transactions = await getAllTransactions(userId, { limit: 10000, offset: 0 });
+  const db = await getDb();
+  const offers = await db.getAllAsync<RideOffer>(
+    `SELECT * FROM ride_offers WHERE user_id = ? ORDER BY captured_at ASC`,
+    [userId]
+  );
+  const offersById = new Map(offers.map((offer) => [offer.id, offer]));
+
+  const candidates = transactions
+    .filter((tx) => tx.type === "income" && typeof tx.description === "string")
+    .map((tx) => {
+      const match = tx.description?.match(RIDE_OFFER_ID_PATTERN);
+      if (!match) return null;
+      const offer = offersById.get(match[1]);
+      if (!offer) return null;
+      return { tx, offer, at: Date.parse(tx.occurred_at) };
+    })
+    .filter((item): item is NonNullable<typeof item> => item != null && Number.isFinite(item.at))
+    .sort((a, b) => a.at - b.at);
+
+  const keptBySignature = new Map<string, { at: number }>();
+  const duplicateIds: string[] = [];
+
+  for (const candidate of candidates) {
+    const signature = rideOfferSignature(candidate.offer);
+    const previous = keptBySignature.get(signature);
+    if (previous && candidate.at - previous.at <= RIDE_DEDUPE_WINDOW_MS) {
+      duplicateIds.push(candidate.tx.id);
+      continue;
+    }
+    keptBySignature.set(signature, { at: candidate.at });
+  }
+
+  for (const id of duplicateIds) {
+    await deleteTransaction(userId, id);
+  }
+
+  return duplicateIds.length;
 }
 
 export async function getAllTransactions(

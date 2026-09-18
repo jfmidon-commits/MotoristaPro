@@ -59,6 +59,10 @@ No painel do Supabase, aplique as migrations em `supabase/migrations/` (ou use `
 npm run typecheck
 ```
 
+## Captura automática Android
+
+A captura experimental de ofertas e do ciclo da corrida é somente leitura e possui coordenação global, watchdog e testes de estresse para uso prolongado. A arquitetura, os limites e os gates obrigatórios da APK estão em [`docs/CAPTURE_STABILITY.md`](docs/CAPTURE_STABILITY.md).
+
 ## Segurança
 
 `.env.local` está no `.gitignore`. Nunca commitar a `service_role key` do Supabase — o app usa apenas a chave pública apropriada ao cliente, protegida pelas policies de RLS.

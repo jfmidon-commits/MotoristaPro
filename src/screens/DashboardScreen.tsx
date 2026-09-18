@@ -109,6 +109,8 @@ export default function DashboardScreen({ navigation }: any) {
     status.pendingMaintenance +
     status.pendingWorkSessions +
     status.pendingPreventiveMaintenance +
+    status.pendingRideOffers +
+    status.pendingRideResults +
     status.pendingDeletes;
 
   const preventiveAttention = preventiveSummary.overdue + preventiveSummary.soon;
