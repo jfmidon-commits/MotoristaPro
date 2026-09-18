@@ -14,7 +14,8 @@
       android:name=".RideAccessibilityService"
       android:label="MotoristaPro — captura de ofertas na tela"
       android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE"
-      android:exported="true">
+      android:exported="true"
+      android:process=":accessibility_uber">
       <intent-filter>
         <action android:name="android.accessibilityservice.AccessibilityService" />
       </intent-filter>
@@ -27,7 +28,8 @@
       android:name=".Ride99AccessibilityService"
       android:label="MotoristaPro — captura 99"
       android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE"
-      android:exported="true">
+      android:exported="true"
+      android:process=":accessibility_99">
       <intent-filter>
         <action android:name="android.accessibilityservice.AccessibilityService" />
       </intent-filter>
@@ -40,7 +42,8 @@
       android:name=".RideLifecycleAccessibilityService"
       android:label="MotoristaPro — ciclo e recebimento da corrida"
       android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE"
-      android:exported="true">
+      android:exported="true"
+      android:process=":accessibility_lifecycle">
       <intent-filter>
         <action android:name="android.accessibilityservice.AccessibilityService" />
       </intent-filter>
