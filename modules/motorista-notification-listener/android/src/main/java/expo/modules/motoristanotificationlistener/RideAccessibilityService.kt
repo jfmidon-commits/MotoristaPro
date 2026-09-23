@@ -99,6 +99,7 @@ class RideAccessibilityService : AccessibilityService() {
   private data class OcrLineRecord(val text: String, val bounds: Rect)
   private data class OfferCard(val lines: List<OcrLineRecord>, val mainFareLine: OcrLineRecord, val actionLine: OcrLineRecord)
   private data class RouteLeg(val minutes: Int, val km: Double, val top: Int)
+  private data class CompactRouteSignal(val minutes: Int, val km: Double, val top: Int)
   private data class DecisionOverlayData(val fare: Double, val totalKm: Double, val totalMinutes: Int, val reaisPerKm: Double, val reaisPerHour: Double, val semaphore: String, val hasStops: Boolean, val signature: String)
   private data class DecisionExtraction(val data: DecisionOverlayData?, val reason: String)
 
@@ -511,6 +512,26 @@ class RideAccessibilityService : AccessibilityService() {
     return OfferCard(cardLines, mainFare, actionLine)
   }
 
+  private fun parseCompactRouteSignal(text: String, top: Int): CompactRouteSignal? {
+    // ML Kit can collapse Uber visual "2,1 km • 3 min" into OCR such as "21-3 min".
+    val normalized = text.lowercase(Locale.ROOT).replace("•", "-").replace("·", "-").replace("—", "-").replace("–", "-").replace(Regex("""\s+"""), " ").trim()
+    val explicit = Regex("""\b([0-9]{1,3}(?:[.,][0-9]{1,2})?)\s*km?\s*-\s*([0-9]{1,3})\s*min\b""", RegexOption.IGNORE_CASE).find(normalized)
+    if (explicit != null) {
+      val km = parseDecimal(explicit.groupValues[1]) ?: return null
+      val minutes = explicit.groupValues[2].toIntOrNull() ?: return null
+      return CompactRouteSignal(minutes, km, top).takeIf { it.km in 0.1..150.0 && it.minutes in 1..360 }
+    }
+    val compact = Regex("""\b([0-9]{2,3})-([0-9]{1,3})\s*min\b""", RegexOption.IGNORE_CASE).find(normalized) ?: return null
+    val rawDistance = compact.groupValues[1]
+    val km = when (rawDistance.length) {
+      2 -> rawDistance.substring(0, 1).toDoubleOrNull()?.plus((rawDistance.substring(1, 2).toDoubleOrNull() ?: return null) / 10.0)
+      3 -> rawDistance.substring(0, 2).toDoubleOrNull()?.plus((rawDistance.substring(2, 3).toDoubleOrNull() ?: return null) / 10.0)
+      else -> null
+    } ?: return null
+    val minutes = compact.groupValues[2].toIntOrNull() ?: return null
+    return CompactRouteSignal(minutes, km, top).takeIf { it.km in 0.1..150.0 && it.minutes in 1..360 }
+  }
+
   private fun parseDurationMinutes(text: String): Int? {
     val hourMatch = HOUR_MINUTE_REGEX.find(text)
     if (hourMatch != null) {
@@ -535,7 +556,17 @@ class RideAccessibilityService : AccessibilityService() {
         direct.putIfAbsent(key, RouteLeg(minutes, distance, line.bounds.top))
       }
     }
-    if (direct.size in 2..3) return direct.values.sortedBy { it.top }
+    if (direct.size in 2..4) return direct.values.sortedBy { it.top }
+
+    val compactSignals = routeLines.mapNotNull { line ->
+      parseCompactRouteSignal(line.text, line.bounds.top)
+    }
+    val compact = LinkedHashMap<String, RouteLeg>()
+    compactSignals.forEach { signal ->
+      val key = signal.minutes.toString() + "|" + String.format(Locale.US, "%.2f", signal.km)
+      compact.putIfAbsent(key, RouteLeg(signal.minutes, signal.km, signal.top))
+    }
+    if (compact.size in 2..4) return compact.values.sortedBy { it.top }
     val timeLines = routeLines.mapNotNull { line -> parseDurationMinutes(line.text)?.let { it to line } }
     val distanceLines = routeLines.mapNotNull { line -> DISTANCE_REGEX.find(line.text)?.groupValues?.getOrNull(1)?.let(::parseDecimal)?.let { km -> km to line } }
     val usedDistance = HashSet<Int>(); val paired = LinkedHashMap<String, RouteLeg>()
@@ -561,7 +592,7 @@ class RideAccessibilityService : AccessibilityService() {
     val fare = FARE_REGEX.find(card.mainFareLine.text)?.groupValues?.getOrNull(1)?.let(::parseDecimal)?.takeIf { it > 0.0 }
       ?: return DecisionExtraction(null, "fare")
     val routeLegs = extractRouteLegs(card)
-    if (routeLegs.size !in 2..3) return DecisionExtraction(null, "legs=${routeLegs.size}")
+    if (routeLegs.size !in 2..4) return DecisionExtraction(null, "legs=${routeLegs.size}")
     val totalMinutes = routeLegs.sumOf { it.minutes }; val totalKm = routeLegs.sumOf { it.km }
     if (totalMinutes !in 2..360 || totalKm <= 0.0 || totalKm > 200.0) return DecisionExtraction(null, "totals=${totalMinutes}min/${format1(totalKm)}km")
     val reaisPerKm = fare / totalKm; val reaisPerHour = fare / (totalMinutes / 60.0)
